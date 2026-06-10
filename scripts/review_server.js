@@ -370,6 +370,15 @@ ${clips}
 });
 
 server.listen(PORT, () => {
+  // 落地两个文件到当前目录（3_审核/），让 agent / 用户随时能找到地址并重启：
+  //   server_url.txt      — 浏览器要打开的地址
+  //   .review_server.pid  — 进程号，用于停止/排障（kill $(cat .review_server.pid)）
+  const url = `http://localhost:${PORT}`;
+  try {
+    fs.writeFileSync('server_url.txt', url + '\n');
+    fs.writeFileSync('.review_server.pid', String(process.pid) + '\n');
+  } catch (e) { /* 写不进不致命，地址下面也会打印 */ }
+
   // 输出机器可读的端口号，供 shell 捕获
   console.log('READY_PORT=' + PORT);
   console.log(`

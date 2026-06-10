@@ -55,12 +55,16 @@ for cmd in ffmpeg node python3 curl; do
 done
 
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONUTF8=1  # 让子进程 python 用 UTF-8，避免中文路径/日志在某些 locale 下乱码
 
 # --auto：在 flash / 标准版 间轮流，让两份各 20h 的免费额度都被消耗（共 ≈40h）
+# 注意：本次选了哪个引擎，要等转录【成功】后才写入 .engine_toggle，
+# 否则失败的运行也会白白切换引擎（下次又轮到另一个，免费额度分摊就乱了）。
+TOGGLE_STATE=""
 if [ "$ENGINE" = "auto" ]; then
   STATE="$SKILL_DIR/.engine_toggle"
   [ "$(cat "$STATE" 2>/dev/null)" = "flash" ] && ENGINE="v3-standard" || ENGINE="flash"
-  echo "$ENGINE" > "$STATE"
+  TOGGLE_STATE="$STATE"
   echo "🔄 auto 轮流：本次用 $ENGINE"
 fi
 
@@ -77,11 +81,11 @@ echo "🚀 步骤2+3: 转录（引擎: $ENGINE）..."
 
 case "$ENGINE" in
   flash)
-    "$SKILL_DIR/scripts/volcengine_flash_transcribe.sh" "$TRANSCRIBE_DIR/audio.mp3" "$TRANSCRIBE_DIR"
+    bash "$SKILL_DIR/scripts/volcengine_flash_transcribe.sh" "$TRANSCRIBE_DIR/audio.mp3" "$TRANSCRIBE_DIR"
     RESULT_FILE="$TRANSCRIBE_DIR/volcengine_v3_result.json"
     ;;
   v3-standard)
-    "$SKILL_DIR/scripts/volcengine_v3_transcribe.sh" "$TRANSCRIBE_DIR/audio.mp3" "$TRANSCRIBE_DIR"
+    bash "$SKILL_DIR/scripts/volcengine_v3_transcribe.sh" "$TRANSCRIBE_DIR/audio.mp3" "$TRANSCRIBE_DIR"
     RESULT_FILE="$TRANSCRIBE_DIR/volcengine_v3_result.json"
     ;;
   v1)
@@ -96,7 +100,7 @@ case "$ENGINE" in
         exit 1
       fi
       echo "  音频URL: $AUDIO_URL"
-      "$SKILL_DIR/scripts/volcengine_transcribe.sh" "$AUDIO_URL" "$TRANSCRIBE_DIR"
+      bash "$SKILL_DIR/scripts/volcengine_transcribe.sh" "$AUDIO_URL" "$TRANSCRIBE_DIR"
     )
     RESULT_FILE="$TRANSCRIBE_DIR/volcengine_result.json"
     ;;
@@ -107,6 +111,9 @@ case "$ENGINE" in
 esac
 
 echo "✅ 步骤2+3 完成"
+
+# 转录成功后才记录本次用的引擎（auto 模式下次轮到另一个）；失败时 set -e 已提前退出，不会切换
+[ -n "$TOGGLE_STATE" ] && echo "$ENGINE" > "$TOGGLE_STATE"
 
 # ── 步骤 4: 生成字幕 ───────────────────────────────────
 echo "📝 步骤4: 生成字幕..."

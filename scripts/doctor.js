@@ -57,6 +57,20 @@ if (!FORCE && fs.existsSync(SENTINEL)) {
   process.exit(0);
 }
 
+// ── 自愈：补回 .sh 执行位 ────────────────────────────────
+// git clone / 解压后 shell 脚本常丢失可执行位，导致 "permission denied"。
+// 主流程已统一用 `bash <script>` 调用（不依赖此位），这里再兜底，方便直接 ./xxx.sh 调用。
+function fixShebangs() {
+  if (isWin) return; // Windows 无执行位概念
+  const dir = path.join(SKILL_DIR, 'scripts');
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.sh')) continue;
+      try { fs.chmodSync(path.join(dir, f), 0o755); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
 // ── 第一层：系统依赖 ─────────────────────────────────────
 function probe(cmd, arg) {
   try {
@@ -228,6 +242,7 @@ async function checkResources(apiKey) {
 (async () => {
   console.log(C.cyan(C.bold('🩺 AI剪口播 · 环境自检')) + C.dim(`  (${process.platform})`));
 
+  fixShebangs();
   const missingDeps = checkDeps();
   const env = checkEnv();
 

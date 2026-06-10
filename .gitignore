@@ -4,6 +4,9 @@
 # 运行时状态文件
 .engine_toggle
 .setup_done
+.review_server.pid
+server_url.txt
+review_server.log
 
 # 转录 / 运行产物（用户跑流程时生成，不应进仓库）
 *_result.json

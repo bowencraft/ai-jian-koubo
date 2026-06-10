@@ -124,7 +124,7 @@ SKILL_DIR="<本 skill 的安装目录>"   # 见上方「路径约定」
 VIDEO_PATH="/path/to/视频.mp4"
 BASE_DIR="$HOME/Desktop/output/$(date +%Y-%m-%d_%H-%M)_$(basename "$VIDEO_PATH" | sed 's/\.[^.]*$//')/剪口播"
 
-"$SKILL_DIR/scripts/run_transcribe.sh" "$VIDEO_PATH" "$BASE_DIR"
+bash "$SKILL_DIR/scripts/run_transcribe.sh" "$VIDEO_PATH" "$BASE_DIR"
 # 输出: BASE_DIR/1_转录/{audio.mp3, volcengine_v3_result.json, subtitles_words.json}
 #
 # 默认引擎: auto 轮流（flash 极速版 auc_turbo ↔ 标准版 auc 交替）
@@ -241,11 +241,14 @@ node "$SKILL_DIR/scripts/generate_review.js" \
 
 # 7. 启动服务器（自动避开已占用端口）+ 打开浏览器
 #    ⚠️ 必须 cd 进 3_审核 再启动，否则静态文件路径错乱
+#    ⚠️ 用 nohup + disown 让进程脱离当前会话：有些 agent 在命令返回后会回收子进程，
+#       直接 `&` 起的服务器会随之退出，浏览器就「拒绝连接」。nohup 让它在会话结束后继续存活。
+LOG="$BASE_DIR/3_审核/review_server.log"
 READY_PORT=""
 for PORT in 8899 8900 8901 8902; do
   # 占用检测：lsof 比 sleep+kill 可靠
   if lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then continue; fi
-  ( cd "$BASE_DIR/3_审核" && node "$SKILL_DIR/scripts/review_server.js" $PORT "$VIDEO_PATH" ) >/tmp/review_server.log 2>&1 &
+  ( cd "$BASE_DIR/3_审核" && nohup node "$SKILL_DIR/scripts/review_server.js" $PORT "$VIDEO_PATH" </dev/null >"$LOG" 2>&1 & disown ) 2>/dev/null
   # 轮询端口直到可用（最多 5 秒）
   for i in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.5
@@ -257,12 +260,18 @@ for PORT in 8899 8900 8901 8902; do
 done
 
 if [ -n "$READY_PORT" ]; then
-  echo "✅ 服务器: http://localhost:$READY_PORT"
-  open -n "http://localhost:$READY_PORT"
+  URL="http://localhost:$READY_PORT"
+  echo "✅ 服务器: $URL  （地址也写到了 3_审核/server_url.txt，进程号在 .review_server.pid）"
+  # 跨平台打开浏览器：macOS open / Linux xdg-open / Windows(Git Bash) start
+  open "$URL" 2>/dev/null || xdg-open "$URL" 2>/dev/null || start "" "$URL" 2>/dev/null || true
+  echo "ℹ️ 若浏览器显示「拒绝连接」，多半是服务进程被会话回收。把下面这条复制到一个独立终端重启即可（它会一直挂着）："
+  echo "   ( cd \"$BASE_DIR/3_审核\" && node \"$SKILL_DIR/scripts/review_server.js\" $READY_PORT \"$VIDEO_PATH\" )"
 else
-  echo "❌ 服务器启动失败，查看 /tmp/review_server.log"
+  echo "❌ 服务器启动失败，查看 $LOG"
 fi
 ```
+
+> **服务器要一直开着**用户才能在网页里审核。如果你（agent）所在的执行环境会在命令返回后杀掉后台进程（部分 agent 沙箱如此），nohup 也保不住——这时**别用后台方式**，直接在一个**独立的、能持续存活的终端**里前台运行上面那条重启命令，让它阻塞挂起，用户审核完再 Ctrl-C。
 
 用户在网页中：播放片段确认 → 勾选/取消 → 点击「导出 FCPXML」→ 生成的 `*_cut.fcpxml` 拖入剪映或 Final Cut Pro 完成最终剪辑。
 
