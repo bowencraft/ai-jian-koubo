@@ -1,126 +1,71 @@
 #!/bin/bash
 #
-# 火山引擎 v3 大模型语音识别标准版（异步模式）
+# 火山引擎 大模型录音文件标准版（auc 接口，异步 submit → query 轮询）
 #
 # 用法:
 #   ./volcengine_v3_transcribe.sh <local_file.mp3> [output_dir]   ← 推荐，base64 直传
-#   ./volcengine_v3_transcribe.sh <audio_url>      [output_dir]   ← 兼容旧用法
+#   ./volcengine_v3_transcribe.sh <audio_url>      [output_dir]   ← URL 模式
 #
 # 输出: <output_dir>/volcengine_v3_result.json
 #
-# 与 v1 的主要差异：
-#   - 单 X-Api-Key 认证（新版控制台），与 flash 共用同一个 VOLCENGINE_API_KEY
-#   - task_id = 自己生成的 UUID，提交和查询复用同一个
-#   - 标准版任务状态在响应头 X-Api-Status-Code，不在响应体
-#     （20000000 成功 / 20000001 处理中 / 20000002 排队中 / 20000003 静音）
-#   - 响应结构: { result: { utterances: [...] } }（v1 是顶层 utterances）
-#   - 词级字段名与 v1 相同: text / start_time / end_time
-#   - audio.url 与 audio.data（base64）二选一
+# 关键（与极速版的差异）:
+#   - 异步：先 submit 提交任务，再 query 轮询，直到完成
+#   - 任务状态在响应头 X-Api-Status-Code，不在 body
+#     （20000000 成功 / 20000001 处理中 / 20000002 排队 / 20000003 静音）
+#     —— 处理中阶段 body 会是 {"result":{"text":""}} 空结果，别误判为失败
+#   - query 必须带回 submit 返回的 X-Tt-Logid，否则可能查不到任务
 #   - 标准版 API: https://www.volcengine.com/docs/6561/1354868
 #
+# 请求体构建 / 状态头解析 / 字数统计与极速版共用 lib/volc_common.sh + lib/build_request.py。
 
 AUDIO_INPUT="$1"
 OUT_DIR="${2:-.}"
 
 if [ -z "$AUDIO_INPUT" ]; then
-  echo "❌ 用法: ./volcengine_v3_transcribe.sh <local_file_or_url> [output_dir]"
+  echo "❌ 用法: $0 <local_file_or_url> [output_dir]"
   exit 1
 fi
 
-# ── 读取凭证（与 flash 共用同一个新版控制台 API Key；见 lib/load_api_key.sh）──
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/load_api_key.sh"
+. "$SCRIPT_DIR/lib/volc_common.sh"
 
-is_local_input=0
-
-# ── 生成唯一 Request ID（提交和查询复用同一个）──────────────
-REQUEST_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
-REQUEST_ID=$(echo "$REQUEST_ID" | tr '[:upper:]' '[:lower:]')
-
-# ── 构建请求体（本地文件用 base64，URL 直接传）──────────────
-TEMP_REQUEST=$(mktemp /tmp/v3_request_XXXXX.json)
-trap 'rm -f "$TEMP_REQUEST"' EXIT
-
-if [[ "$AUDIO_INPUT" =~ ^https?:// ]]; then
-  echo "🎤 提交火山引擎 v3 大模型转录任务（URL 模式）..."
-  echo "音频 URL: $AUDIO_INPUT"
-  python3 - <<PYEOF > "$TEMP_REQUEST"
-import json
-req = {
-    "user": {"uid": "ai_jiankoubo"},
-    "audio": {"url": "$AUDIO_INPUT", "format": "mp3"},
-    "request": {
-        "model_name": "bigmodel",
-        "enable_itn": True,
-        "enable_punc": False,
-        "enable_ddc": False,
-        "show_utterances": True,
-        "enable_speaker_info": False
-    }
-}
-print(json.dumps(req))
-PYEOF
-else
-  is_local_input=1
-  if [ ! -f "$AUDIO_INPUT" ]; then
-    echo "❌ 文件不存在: $AUDIO_INPUT"
-    exit 1
-  fi
-  FILE_SIZE=$(du -sh "$AUDIO_INPUT" | cut -f1)
-  echo "🎤 提交火山引擎 v3 大模型转录任务（base64 模式）..."
-  echo "音频文件: $AUDIO_INPUT ($FILE_SIZE)"
-  python3 - "$AUDIO_INPUT" <<'PYEOF' > "$TEMP_REQUEST"
-import json, base64, sys
-with open(sys.argv[1], "rb") as f:
-    data = base64.b64encode(f.read()).decode()
-req = {
-    "user": {"uid": "ai_jiankoubo"},
-    "audio": {"data": data, "format": "mp3"},
-    "request": {
-        "model_name": "bigmodel",
-        "enable_itn": True,
-        "enable_punc": False,
-        "enable_ddc": False,
-        "show_utterances": True,
-        "enable_speaker_info": False
-    }
-}
-print(json.dumps(req))
-PYEOF
+if [[ ! "$AUDIO_INPUT" =~ ^https?:// ]] && [ ! -f "$AUDIO_INPUT" ]; then
+  echo "❌ 文件不存在: $AUDIO_INPUT"
+  exit 1
 fi
+mkdir -p "$OUT_DIR"
 
-echo "Request ID: $REQUEST_ID"
+REQ=$(mktemp /tmp/v3_req_XXXXX.json)
+SUB_HDR=$(mktemp /tmp/v3_subhdr_XXXXX.txt)
+SUB_BODY=$(mktemp /tmp/v3_subbody_XXXXX.json)
+Q_HDR=$(mktemp /tmp/v3_qhdr_XXXXX.txt)
+Q_BODY=$(mktemp /tmp/v3_qbody_XXXXX.json)
+trap 'rm -f "$REQ" "$SUB_HDR" "$SUB_BODY" "$Q_HDR" "$Q_BODY"' EXIT
+
+REQUEST_ID=$(volc_gen_request_id)
 
 # ── 步骤 1: 提交任务 ────────────────────────────────────────
-# 标准版状态码在响应头（X-Api-Status-Code），不在 body —— 必须用 -D 抓头部。
-SUBMIT_HEADERS=$(mktemp /tmp/v3_submit_headers_XXXXX.txt)
-SUBMIT_BODY=$(mktemp /tmp/v3_submit_body_XXXXX.json)
-QUERY_HEADERS=$(mktemp /tmp/v3_query_headers_XXXXX.txt)
-QUERY_BODY=$(mktemp /tmp/v3_query_body_XXXXX.json)
-trap 'rm -f "$TEMP_REQUEST" "$SUBMIT_HEADERS" "$SUBMIT_BODY" "$QUERY_HEADERS" "$QUERY_BODY"' EXIT
+echo "🎤 提交火山引擎 标准版 转录任务..."
+echo "   输入: $AUDIO_INPUT"
+volc_build_request "$AUDIO_INPUT" "$REQ"
 
-HTTP_CODE=$(curl -s -L -D "$SUBMIT_HEADERS" -o "$SUBMIT_BODY" -w "%{http_code}" -X POST "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit" \
+HTTP_CODE=$(curl -s -L -D "$SUB_HDR" -o "$SUB_BODY" -w "%{http_code}" \
+  -X POST "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit" \
   -H "X-Api-Key: $API_KEY" \
   -H "X-Api-Resource-Id: volc.bigasr.auc" \
   -H "X-Api-Request-Id: $REQUEST_ID" \
   -H "X-Api-Sequence: -1" \
   -H "Content-Type: application/json" \
-  --data-binary "@$TEMP_REQUEST")
+  --data-binary "@$REQ")
 
-SUBMIT_STATUS=$(grep -i '^x-api-status-code:' "$SUBMIT_HEADERS" | tail -1 | tr -d '\r' | awk '{print $2}')
-SUBMIT_MSG=$(grep -i '^x-api-message:' "$SUBMIT_HEADERS" | tail -1 | tr -d '\r' | cut -d' ' -f2-)
-# query 时要带回 submit 返回的 logid，否则标准版可能查不到任务
-LOG_ID=$(grep -i '^x-tt-logid:' "$SUBMIT_HEADERS" | tail -1 | tr -d '\r' | cut -d' ' -f2-)
-
-echo "提交状态: ${SUBMIT_STATUS:-未返回} ${SUBMIT_MSG:-}"
+SUBMIT_STATUS=$(volc_status "$SUB_HDR")
+LOG_ID=$(volc_header "$SUB_HDR" x-tt-logid)
+echo "提交状态: ${SUBMIT_STATUS:-未返回} $(volc_header "$SUB_HDR" x-api-message)"
 
 if [ "$SUBMIT_STATUS" != "20000000" ]; then
-  echo "❌ 提交失败"
-  echo "   HTTP: $HTTP_CODE"
-  echo "   状态码: ${SUBMIT_STATUS:-未返回}"
-  echo "   消息: ${SUBMIT_MSG:-未返回}"
-  echo "完整响应:"
-  cat "$SUBMIT_BODY"
+  echo "❌ 提交失败 (HTTP $HTTP_CODE, 状态码 ${SUBMIT_STATUS:-未返回})"
+  cat "$SUB_BODY"
   echo ""
   exit 1
 fi
@@ -128,73 +73,56 @@ fi
 echo "✅ 任务已提交"
 echo "⏳ 等待转录完成..."
 
+# query 时带回 submit 的 logid（用数组拼接，避免可选 header 的引号陷阱）
+QUERY_LOGID=()
+[ -n "$LOG_ID" ] && QUERY_LOGID=(-H "X-Tt-Logid: $LOG_ID")
+
 # ── 步骤 2: 轮询结果 ────────────────────────────────────────
-# 关键：只看响应头 X-Api-Status-Code 判状态。
-# 20000001/20000002 = 仍在处理/排队 → 继续轮询；
-# 不要因为此时 body 是 {"result":{"text":""}} 这种空结果就误判“结果为空”退出。
-MAX_ATTEMPTS=120  # 最多等待 10 分钟（每 5 秒一次）
+MAX_ATTEMPTS=120  # 最多等 10 分钟（每 5 秒一次）
 ATTEMPT=0
 
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
   sleep 5
   ATTEMPT=$((ATTEMPT + 1))
 
-  if [ -n "$LOG_ID" ]; then
-    curl -s -L -D "$QUERY_HEADERS" -o "$QUERY_BODY" -X POST "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query" \
-      -H "X-Api-Key: $API_KEY" \
-      -H "X-Api-Resource-Id: volc.bigasr.auc" \
-      -H "X-Api-Request-Id: $REQUEST_ID" \
-      -H "X-Tt-Logid: $LOG_ID" \
-      -H "Content-Type: application/json" \
-      -d "{}"
-  else
-    curl -s -L -D "$QUERY_HEADERS" -o "$QUERY_BODY" -X POST "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query" \
-      -H "X-Api-Key: $API_KEY" \
-      -H "X-Api-Resource-Id: volc.bigasr.auc" \
-      -H "X-Api-Request-Id: $REQUEST_ID" \
-      -H "Content-Type: application/json" \
-      -d "{}"
-  fi
+  curl -s -L -D "$Q_HDR" -o "$Q_BODY" \
+    -X POST "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query" \
+    -H "X-Api-Key: $API_KEY" \
+    -H "X-Api-Resource-Id: volc.bigasr.auc" \
+    -H "X-Api-Request-Id: $REQUEST_ID" \
+    "${QUERY_LOGID[@]}" \
+    -H "Content-Type: application/json" \
+    -d "{}"
 
-  STATUS=$(grep -i '^x-api-status-code:' "$QUERY_HEADERS" | tail -1 | tr -d '\r' | awk '{print $2}')
-  MSG=$(grep -i '^x-api-message:' "$QUERY_HEADERS" | tail -1 | tr -d '\r' | cut -d' ' -f2-)
-
-  if [ "$STATUS" = "20000000" ]; then
-    # 成功
-    cp "$QUERY_BODY" "$OUT_DIR/volcengine_v3_result.json"
-    echo ""
-    echo "✅ 转录完成，已保存 $OUT_DIR/volcengine_v3_result.json"
-
-    # 显示识别到的文字数量
-    WORD_COUNT=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); r=d.get("result",{}); print("%d utterances / %d 字" % (len(r.get("utterances",[]) or []), len(r.get("text","") or "")))' "$OUT_DIR/volcengine_v3_result.json" 2>/dev/null || echo "?")
-    echo "📝 识别结果: $WORD_COUNT"
-    exit 0
-
-  elif [ "$STATUS" = "20000001" ] || [ "$STATUS" = "20000002" ]; then
-    # 处理中 / 排队中 —— 继续等，空 body 是正常的
-    echo -n "."
-
-  elif [ "$STATUS" = "20000003" ]; then
-    echo ""
-    echo "⚠️  音频为静音，无法识别"
-    exit 1
-
-  elif [ -n "$STATUS" ]; then
-    # 其他错误码
-    echo ""
-    echo "❌ 转录失败（状态码: $STATUS），响应:"
-    echo "   消息: ${MSG:-未返回}"
-    if [ "$STATUS" = "45000000" ] && [ "$is_local_input" = "1" ]; then
-      echo "   诊断: 若 submit 返回 OK 但 query 查不到任务，可改用 --flash，或传公网音频 URL。"
-    fi
-    cat "$QUERY_BODY"
-    echo ""
-    exit 1
-
-  else
-    # 头部暂时没拿到状态码，继续轮询
-    echo -n "."
-  fi
+  STATUS=$(volc_status "$Q_HDR")
+  case "$STATUS" in
+    20000000)
+      cp "$Q_BODY" "$OUT_DIR/volcengine_v3_result.json"
+      echo ""
+      echo "✅ 转录完成，已保存 $OUT_DIR/volcengine_v3_result.json"
+      echo "📝 识别结果: $(volc_word_count "$OUT_DIR/volcengine_v3_result.json")"
+      exit 0
+      ;;
+    20000001|20000002)  # 处理中 / 排队 —— 空 body 正常，继续轮询
+      echo -n "."
+      ;;
+    20000003)
+      echo ""
+      echo "⚠️  音频为静音，无法识别"
+      exit 1
+      ;;
+    "")  # 头部暂未拿到状态码，继续
+      echo -n "."
+      ;;
+    *)
+      echo ""
+      echo "❌ 转录失败（状态码: $STATUS）"
+      echo "   消息: $(volc_header "$Q_HDR" x-api-message)"
+      cat "$Q_BODY"
+      echo ""
+      exit 1
+      ;;
+  esac
 done
 
 echo ""

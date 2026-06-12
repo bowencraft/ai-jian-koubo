@@ -27,7 +27,7 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 **模式 B（转字幕）：**
 ```
 output/YYYY-MM-DD_HH-MM_视频名/剪口播/
-├── 1_转录/   audio.mp3 · volcengine_result.json · subtitles_words.json · raw_text.txt
+├── 1_转录/   audio.mp3 · volcengine_v3_result.json · subtitles_words.json · raw_text.txt
 └── 2_纠错/   corrected.txt · uncertain.md（可选）
 视频所在目录/
 └── subtitles_formatted.md   ← 最终输出
@@ -134,8 +134,7 @@ bash "$SKILL_DIR/scripts/run_transcribe.sh" "$VIDEO_PATH" "$BASE_DIR"
 #   - 限制: 音频 ≤ 2h、≤ 100MB
 # 可选引擎（只开了一个资源、或想固定用某个时加）:
 #   --flash        只用极速版（一次直出、最快）
-#   --v3-standard  只用标准版（异步轮询，实测可用）
-#   --v1           旧版 ASR（会把音频上传到 uguu.se 公网图床，有隐私风险）
+#   --v3-standard  只用标准版（异步 submit/query 轮询）
 ```
 
 ### 步骤 5: 生成分析文件 + 口误识别
@@ -327,6 +326,4 @@ VOLCENGINE_API_KEY=your_api_key_here
 去[新版控制台](https://console.volcengine.com/speech/new/overview)生成 **一个** API Key 即可——所有引擎共用这同一个 `VOLCENGINE_API_KEY`（均为新版控制台单 `X-Api-Key` 认证）。
 
 默认 `auto` 轮流模式会交替用极速版和标准版，**需同时开通两个资源**：「录音文件识别 - 极速版」（`volc.bigasr.auc_turbo`）+「录音文件识别 - 标准版」（`volc.bigasr.auc`）。两者各有 20h 免费额度、各自独立抵扣，轮流即可吃满 ≈40h。若只想/只开通了其中一个资源，加 `--flash` 或 `--v3-standard` 固定使用。
-
-热词词典（可选，仅 `--v1` 引擎生效）：`scripts/词典.txt`，每行一个词。
 

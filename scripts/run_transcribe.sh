@@ -7,12 +7,11 @@
 #   （无）/--auto 每次在 flash / 标准版 间交替，分摊两份各 20h 免费额度 ≈ 共 40h
 #                 （需在控制台同时开通极速版 auc_turbo 与标准版 auc 两个资源）
 #   --flash       只用极速版 auc_turbo（一次直出、最快；只开了一个资源时用这个）
-#   --v3-standard 只用标准版 auc（异步轮询，base64 未文档化但实测可用）
-#   --v1          旧版 ASR（必须先把音频上传到公网图床 uguu.se，不推荐）
+#   --v3-standard 只用标准版 auc（异步 submit/query 轮询）
 #
 # 输出: base_output_dir/1_转录/
 #   ├── audio.mp3
-#   ├── volcengine_v3_result.json （或 volcengine_result.json，取决于引擎）
+#   ├── volcengine_v3_result.json
 #   └── subtitles_words.json
 #
 
@@ -25,7 +24,6 @@ ENGINE="auto"  # 默认 flash / 标准版 轮流，吃满两份免费额度
 # 检测引擎参数（任意位置）
 for arg in "$@"; do
   case "$arg" in
-    --v1)          ENGINE="v1" ;;
     --v3-standard) ENGINE="v3-standard" ;;
     --flash)       ENGINE="flash" ;;
     --auto)        ENGINE="auto" ;;
@@ -33,7 +31,7 @@ for arg in "$@"; do
 done
 
 if [ -z "$VIDEO_PATH" ]; then
-  echo "用法: $0 <video.mp4> [base_output_dir] [--v3-standard|--v1]"
+  echo "用法: $0 <video.mp4> [base_output_dir] [--flash|--v3-standard]"
   exit 1
 fi
 
@@ -87,22 +85,6 @@ case "$ENGINE" in
   v3-standard)
     bash "$SKILL_DIR/scripts/volcengine_v3_transcribe.sh" "$TRANSCRIBE_DIR/audio.mp3" "$TRANSCRIBE_DIR"
     RESULT_FILE="$TRANSCRIBE_DIR/volcengine_v3_result.json"
-    ;;
-  v1)
-    (
-      cd "$TRANSCRIBE_DIR"
-      echo "  ⚠️  v1 引擎需要把音频上传到公网图床（uguu.se），存在隐私风险"
-      echo "  上传音频到 uguu.se..."
-      UPLOAD_RESP=$(curl -s -F "files[]=@audio.mp3" https://uguu.se/upload)
-      AUDIO_URL=$(echo "$UPLOAD_RESP" | node -e "process.stdin.resume();let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).files[0].url))")
-      if [ -z "$AUDIO_URL" ]; then
-        echo "❌ 上传失败，响应: $UPLOAD_RESP"
-        exit 1
-      fi
-      echo "  音频URL: $AUDIO_URL"
-      bash "$SKILL_DIR/scripts/volcengine_transcribe.sh" "$AUDIO_URL" "$TRANSCRIBE_DIR"
-    )
-    RESULT_FILE="$TRANSCRIBE_DIR/volcengine_result.json"
     ;;
   *)
     echo "❌ 未知引擎: $ENGINE"

@@ -2,14 +2,14 @@
 /**
  * 从火山引擎结果生成字级别字幕
  *
- * 用法: node generate_subtitles.js <volcengine_result.json> [delete_segments.json]
+ * 用法: node generate_subtitles.js <volcengine_v3_result.json> [delete_segments.json]
  * 输出: subtitles_words.json
  */
 
 const fs = require('fs');
 const path = require('path');
 
-const resultFile = process.argv[2] || 'volcengine_result.json';
+const resultFile = process.argv[2] || 'volcengine_v3_result.json';
 const deleteFile = process.argv[3];
 const outDir = process.argv[4] || '.';
 

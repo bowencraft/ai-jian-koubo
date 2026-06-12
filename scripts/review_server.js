@@ -13,8 +13,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
-const { computeFinalKeeps } = require('./lib/compute_keeps');
+const { buildFcpxml } = require('./lib/fcpxml');
 
 const PORT = process.argv[2] || 8899;
 const VIDEO_FILE = process.argv[3];
@@ -131,106 +130,14 @@ const server = http.createServer((req, res) => {
         const deleteList = Array.isArray(parsed) ? parsed : (parsed.deleteList || []);
         const cutOpts = (parsed && !Array.isArray(parsed) && parsed.opts) ? parsed.opts : undefined;
         const finalSelected = (parsed && !Array.isArray(parsed) && Array.isArray(parsed.finalSelected)) ? parsed.finalSelected : null;
-        const videoAbsPath = path.resolve(VIDEO_FILE);
 
-        // 获取视频时长
-        const duration = parseFloat(
-          execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "file:${VIDEO_FILE}"`).toString().trim()
-        );
-
-        // 获取帧率（有理数形式，如 "30000/1001" = 29.97fps）
-        const fpsRaw = execSync(
-          `ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "file:${VIDEO_FILE}"`
-        ).toString().trim().replace(/,+$/, '');
-        const fpsParts = fpsRaw.split('/').map(Number);
-        const [fpsNum, fpsDen] = fpsParts.length === 2 ? fpsParts : [fpsParts[0], 1];
-
-        // 获取视频宽高
-        const sizeRaw = execSync(
-          `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "file:${VIDEO_FILE}"`
-        ).toString().trim().split(',');
-        const width = parseInt(sizeRaw[0]) || 1920;
-        const height = parseInt(sizeRaw[1]) || 1080;
-
-        // FCP 时间计算：ticks = 帧号 × fpsDen，分母为 fpsNum
-        // 29.97fps (30000/1001): 1帧 = 1001/30000s，1s ≈ 30帧 → 30*1001=30030/30000s
-        // 30fps   (30/1):        1帧 = 1/30s，    1s = 30帧 → 30*1=30/30s
-        // 24fps   (24/1):        1帧 = 1/24s，    1s = 24帧 → 24*1=24/24s
-        const timeScale = fpsNum;
-
-        const toFCPTicks = (sec) => {
-          const frameNum = Math.round(sec * fpsNum / fpsDen);
-          return frameNum * fpsDen;  // 适用所有帧率
-        };
-
-        // format frameDuration
-        const frameDuration = `${fpsDen}/${fpsNum}s`;
-
-        // 计算保留片段：合并删除段 → 取反 → 边界吸附静音 → 内部长静音二次切
-        // 算法在 lib/compute_keeps.js，与审核页前端预览共用同一份代码
-        const finalKeeps = computeFinalKeeps(deleteList, silencePeriods, duration, cutOpts);
-
-        const baseName = path.basename(VIDEO_FILE, path.extname(VIDEO_FILE));
-
-        // 输出文件路径
-        const outputFcpxml = path.resolve(`${baseName}_cut.fcpxml`);
-
-        // 编码 URL（空格和特殊字符）
-        const videoSrc = 'file://' + videoAbsPath.split('').map(c => {
-          if (/[a-zA-Z0-9\-_.~/]/.test(c)) return c;
-          return encodeURIComponent(c);
-        }).join('');
-
-        const fcpxmlSrc = 'file://' + outputFcpxml.split('').map(c => {
-          if (/[a-zA-Z0-9\-_.~/]/.test(c)) return c;
-          return encodeURIComponent(c);
-        }).join('');
-
-        // 生成 UUID（FCP 要求的格式）
-        function uuid() {
-          return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-            const r = Math.random() * 16 | 0;
-            const v = c === 'x' ? r : (r & 0x3 | 0x8);
-            return v.toString(16);
-          });
-        }
-
-        // asset duration 用音频采样率分母（48000）
-        const audioRate = 48000;
-        const assetDurationNum = Math.round(duration * audioRate);
-
-        // 构建 asset-clip（每个保留片段引用同一个 asset r1）
-        // 注：FCPXML 1.8 DTD 不支持 fade-in/fade-out 元素，淡入淡出由 ffmpeg 直出处理
-        // offset 在 tick 空间累加，避免浮点秒累积误差导致 ±1 帧偏移
-        let timelineOffsetTicks = 0;
-        const clips = finalKeeps.map((seg) => {
-          const startTicks = toFCPTicks(seg.start);
-          const durTicks = toFCPTicks(seg.end - seg.start);
-          const offsetTicks = timelineOffsetTicks;
-          timelineOffsetTicks += durTicks;
-          return `            <asset-clip name="${baseName}" offset="${offsetTicks}/${fpsNum}s" ref="r1" start="${startTicks}/${fpsNum}s" duration="${durTicks}/${fpsNum}s" audioRole="dialogue" format="r2" tcFormat="NDF" />`;
-        }).join('\n');
-
-        const totalTicks = timelineOffsetTicks;
-
-        const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<fcpxml version="1.8">
-  <resources>
-    <format id="r2" frameDuration="${frameDuration}" width="${width}" height="${height}" colorSpace="1-1-1 (Rec. 709)" />
-    <asset id="r1" name="${baseName}" src="${videoSrc}" start="0/1s" duration="${assetDurationNum}/${audioRate}s" format="r2" hasAudio="1" hasVideo="1" audioSources="1" audioChannels="2" audioRate="48k" />
-  </resources>
-  <library location="${fcpxmlSrc}">
-    <event name="${baseName}_剪辑" uid="${uuid()}">
-      <project name="${baseName}_cut" uid="${uuid()}">
-        <sequence duration="${totalTicks}/${fpsNum}s" format="r2" tcStart="0/1s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
-          <spine>
-${clips}
-          </spine>
-        </sequence>
-      </project>
-    </event>
-  </library>
-</fcpxml>`;
+        // FCPXML 生成（含 ffprobe 探测 + 切割算法）抽到 lib/fcpxml.js，便于单测
+        const { xml, outputPath: outputFcpxml, finalKeeps, baseName } = buildFcpxml({
+          videoFile: VIDEO_FILE,
+          deleteList,
+          silencePeriods,
+          cutOpts,
+        });
 
         fs.writeFileSync(outputFcpxml, xml);
         console.log(`✅ 导出 FCPXML: ${outputFcpxml} (${finalKeeps.length} 片段)`);
