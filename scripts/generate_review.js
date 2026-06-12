@@ -118,8 +118,22 @@ try {
     start: parseFloat(m[1]),
     end:   se[i] ? parseFloat(se[i][1]) : audioDuration  // 末尾静音用音频时长兜底
   }));
-  fs.writeFileSync(silenceOut, JSON.stringify(periods));
-  console.log('🔕 静音检测完成，' + periods.length + ' 段 → silence_periods.json');
+
+  // ── 能量回收：补全 ASR 越界时间戳吞掉的句尾换气/静音 ──
+  // 全局 dB silencedetect 漏掉的：ASR 把字说完后的静音圈进了字里，间隙 < 0.2s 不成 gap，
+  // 换气声又比阈值响。refine_boundaries 用真实音频能量把字边界缩回真声处，挖出这些段，与 dB 取并集。
+  let finalSilence = periods;
+  try {
+    const { reclaim } = require('./lib/refine_boundaries');
+    const r = reclaim({ audioFile: audioDst, words, baseSilence: periods });
+    finalSilence = r.merged;
+    console.log('🎯 能量回收: 新挖出 ' + r.reclaimedCount + ' 段句尾换气/静音');
+  } catch (e) {
+    console.warn('⚠️  能量回收跳过(回退纯 dB): ' + e.message);
+  }
+
+  fs.writeFileSync(silenceOut, JSON.stringify(finalSilence));
+  console.log('🔕 静音检测完成，dB ' + periods.length + ' 段 → 并集 ' + finalSilence.length + ' 段 → silence_periods.json');
 } catch (e) {
   console.warn('⚠️  silencedetect 失败，跳过: ' + e.message);
   fs.writeFileSync(silenceOut, '[]');
