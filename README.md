@@ -107,4 +107,6 @@ export VOLCENGINE_API_KEY=粘贴你的key
 
 ## License
 
-[MIT](LICENSE) — 随便用、改、分发。
+[AGPL-3.0](LICENSE) — 自由使用、修改、分发；但**任何修改版都必须同样以 AGPL-3.0 开源，包括把它做成网页 / 在线服务对外提供时也要公开你的改动源码**。
+
+Copyright © 2026 栗氪聊AI
