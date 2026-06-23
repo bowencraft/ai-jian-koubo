@@ -832,6 +832,9 @@
     </div>
     <div class="tb-right">
       <button class="ghost" onclick="saveDraft()" title="保存当前勾选状态到本地 review_draft.json">保存进度</button>
+      <button class="ghost" onclick="exportDraft()" title="把当前进度下载为 JSON 文件">导出进度</button>
+      <button class="ghost" onclick="document.getElementById('draftImport').click()" title="导入之前导出的进度 JSON">导入进度</button>
+      <input id="draftImport" type="file" accept="application/json,.json" style="display:none" onchange="importDraftFile(event)">
       <button class="primary" onclick="exportFCPXML()">导出 FCPXML</button>
       <div class="tb-sep"></div>
       <button class="danger" onclick="clearAll()" title="清空选择">清空</button>
@@ -965,6 +968,7 @@
     const DRAG_THRESHOLD = 4;          // px，超过才算「划」，否则算「点」
     const undoStack = [];             // 每次编辑前的 selected 快照
     let previewUntil = null;          // 「试听这段」时播放到此秒数即停（且期间不跳删除段）
+    let currentProjectSignature = null;
 
     // 波形 / 切割预览数据
     let peaksData = null;          // { duration, sampleRate, peaks:[0..1] }
@@ -1008,6 +1012,7 @@
         ]);
         peaksData = (pk && Array.isArray(pk.peaks)) ? pk : null;
         silencePeriods = Array.isArray(sp) ? sp.slice().sort((a, b) => a.start - b.start) : [];
+        currentProjectSignature = draftResp && draftResp.projectSignature ? draftResp.projectSignature : null;
         const restored = applyDraft(draftResp && draftResp.draft);
 
         initWave();
@@ -1856,6 +1861,10 @@
 
     function applyDraft(draft) {
       if (!draft || !Array.isArray(draft.selectedIdx)) return false;
+      if (draft.projectSignature && currentProjectSignature && draft.projectSignature !== currentProjectSignature) {
+        console.warn('进度文件和当前剪辑内容不一致，已跳过自动恢复');
+        return false;
+      }
       selected.clear();
       draft.selectedIdx.forEach(idx => {
         if (Number.isInteger(idx) && words[idx]) selected.add('word-' + idx);
@@ -1870,22 +1879,73 @@
       return true;
     }
 
+    function buildDraftPayload() {
+      return {
+        version: 2,
+        projectSignature: currentProjectSignature,
+        savedAt: new Date().toISOString(),
+        selectedIdx: getSelectedIdx(),
+        cutOpts,
+        currentTime: video.currentTime || 0
+      };
+    }
+
     async function saveDraft() {
       try {
         const res = await fetch('/api/draft', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            selectedIdx: getSelectedIdx(),
-            cutOpts,
-            currentTime: video.currentTime || 0
-          })
+          body: JSON.stringify(buildDraftPayload())
         });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || '保存失败');
         alert(`✅ 进度已保存\n\n已保存 ${data.count} 个选中项\n文件: review_draft.json`);
       } catch (err) {
         alert('❌ 保存失败: ' + err.message);
+      }
+    }
+
+    function exportDraft() {
+      const draft = buildDraftPayload();
+      const blob = new Blob([JSON.stringify(draft, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `review_draft_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    async function importDraftFile(event) {
+      const input = event.target;
+      const file = input.files && input.files[0];
+      input.value = '';
+      if (!file) return;
+      try {
+        const draft = JSON.parse(await file.text());
+        if (!draft || !Array.isArray(draft.selectedIdx)) {
+          throw new Error('这不是有效的进度文件');
+        }
+        if (!draft.projectSignature) {
+          throw new Error('进度文件缺少项目签名，无法确认是否匹配当前剪辑内容');
+        }
+        if (!currentProjectSignature || draft.projectSignature !== currentProjectSignature) {
+          throw new Error('进度文件和当前剪辑内容不一致，已停止导入');
+        }
+        pushUndo();
+        if (!applyDraft(draft)) throw new Error('进度文件无法应用到当前项目');
+        refreshSelectionStyles();
+        render();
+        const res = await fetch('/api/draft', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(draft)
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || '导入后保存失败');
+        alert(`✅ 进度已导入\n\n已恢复 ${data.count} 个选中项，并保存为本地 review_draft.json`);
+      } catch (err) {
+        alert('❌ 导入失败: ' + err.message);
       }
     }
 

@@ -13,6 +13,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { buildFcpxml } = require('./lib/fcpxml');
 
 const PORT = process.argv[2] || 8899;
@@ -51,6 +52,19 @@ try {
 } catch (e) {
   console.warn('⚠️ 读取 data.json 失败，导出时将无法生成 review_log.json（自进化学习日志）');
 }
+
+const projectSignature = crypto
+  .createHash('sha256')
+  .update(JSON.stringify({
+    words: reviewWords.map(w => ({
+      text: w.text || '',
+      start: Number.isFinite(w.start) ? Number(w.start.toFixed(3)) : null,
+      end: Number.isFinite(w.end) ? Number(w.end.toFixed(3)) : null,
+      isGap: !!w.isGap,
+    })),
+    aiSelectedIdx,
+  }))
+  .digest('hex');
 
 const MIME_TYPES = {
   '.html': 'text/html',
@@ -212,14 +226,14 @@ const server = http.createServer((req, res) => {
     const draftPath = path.resolve('review_draft.json');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     if (!fs.existsSync(draftPath)) {
-      res.end(JSON.stringify({ success: true, draft: null }));
+      res.end(JSON.stringify({ success: true, draft: null, projectSignature }));
       return;
     }
     try {
       const draft = JSON.parse(fs.readFileSync(draftPath, 'utf8'));
-      res.end(JSON.stringify({ success: true, draft }));
+      res.end(JSON.stringify({ success: true, draft, projectSignature }));
     } catch (err) {
-      res.end(JSON.stringify({ success: false, error: err.message, draft: null }));
+      res.end(JSON.stringify({ success: false, error: err.message, draft: null, projectSignature }));
     }
     return;
   }
@@ -230,6 +244,14 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const parsed = JSON.parse(body || '{}');
+        if (parsed.projectSignature && parsed.projectSignature !== projectSignature) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: false,
+            error: '进度文件和当前剪辑内容不一致，已停止导入',
+          }));
+          return;
+        }
         const selectedIdx = Array.isArray(parsed.selectedIdx)
           ? parsed.selectedIdx
               .map(n => Number(n))
@@ -237,7 +259,8 @@ const server = http.createServer((req, res) => {
               .sort((a, b) => a - b)
           : [];
         const draft = {
-          version: 1,
+          version: 2,
+          projectSignature,
           savedAt: new Date().toISOString(),
           selectedIdx,
           cutOpts: parsed.cutOpts && typeof parsed.cutOpts === 'object' ? parsed.cutOpts : null,
