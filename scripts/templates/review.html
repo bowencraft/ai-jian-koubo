@@ -831,6 +831,7 @@
       <span class="time-display"><span id="timeCur">00:00</span><span class="sep">/</span><span id="timeTot">00:00</span></span>
     </div>
     <div class="tb-right">
+      <button class="ghost" onclick="saveDraft()" title="保存当前勾选状态到本地 review_draft.json">保存进度</button>
       <button class="primary" onclick="exportFCPXML()">导出 FCPXML</button>
       <div class="tb-sep"></div>
       <button class="danger" onclick="clearAll()" title="清空选择">清空</button>
@@ -1000,15 +1001,20 @@
         markSegsDirty();
 
         // 并行加载波形包络 + 静音段（任一缺失都不阻塞主流程）
-        const [pk, sp] = await Promise.all([fetchJSON('./peaks.json'), fetchJSON('./silence_periods.json')]);
+        const [pk, sp, draftResp] = await Promise.all([
+          fetchJSON('./peaks.json'),
+          fetchJSON('./silence_periods.json'),
+          fetchJSON('/api/draft')
+        ]);
         peaksData = (pk && Array.isArray(pk.peaks)) ? pk : null;
         silencePeriods = Array.isArray(sp) ? sp.slice().sort((a, b) => a.start - b.start) : [];
+        const restored = applyDraft(draftResp && draftResp.draft);
 
         initWave();
 
         // 顶栏文件元信息
         document.getElementById('fileSub').innerHTML =
-          `REVIEW <span class="dot">●</span> ${aiSelectedIds.size} 处 AI 预选`;
+          `REVIEW <span class="dot">●</span> ${aiSelectedIds.size} 处 AI 预选${restored ? ' <span class="dot">●</span> 已恢复草稿' : ''}`;
 
         loadingOverlay.classList.remove('show');
         clearInterval(msgTimer);
@@ -1840,6 +1846,49 @@
       timeTot.textContent = formatTime(video.duration || 0);
     });
     function clearAll() { pushUndo(); selected.clear(); markSegsDirty(); render(); }
+
+    function getSelectedIdx() {
+      return [...selected]
+        .map(id => parseInt(id.replace('word-', ''), 10))
+        .filter(n => !Number.isNaN(n))
+        .sort((a, b) => a - b);
+    }
+
+    function applyDraft(draft) {
+      if (!draft || !Array.isArray(draft.selectedIdx)) return false;
+      selected.clear();
+      draft.selectedIdx.forEach(idx => {
+        if (Number.isInteger(idx) && words[idx]) selected.add('word-' + idx);
+      });
+      if (draft.cutOpts && typeof draft.cutOpts === 'object') {
+        cutOpts = { ...cutOpts, ...draft.cutOpts };
+      }
+      if (Number.isFinite(draft.currentTime) && draft.currentTime > 0) {
+        video.currentTime = draft.currentTime;
+      }
+      markSegsDirty();
+      return true;
+    }
+
+    async function saveDraft() {
+      try {
+        const res = await fetch('/api/draft', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            selectedIdx: getSelectedIdx(),
+            cutOpts,
+            currentTime: video.currentTime || 0
+          })
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || '保存失败');
+        alert(`✅ 进度已保存\n\n已保存 ${data.count} 个选中项\n文件: review_draft.json`);
+      } catch (err) {
+        alert('❌ 保存失败: ' + err.message);
+      }
+    }
+
     function applySilenceThreshold(threshold) {
       pushUndo();
       words.forEach((w, idx) => { if (w.isGap) selected.delete('word-' + idx); });
@@ -1858,10 +1907,7 @@
       if (!segments.length) { alert('没有选中任何片段'); return; }
       // 把「你最终选中的词级 idx」一并送给服务器，供自进化学习写 review_log.json。
       // selected 里是 'word-<idx>'，提取数字、升序；服务器再 diff AI 初选 vs 你最终。
-      const finalSelected = [...selected]
-        .map(id => parseInt(id.replace('word-', ''), 10))
-        .filter(n => !Number.isNaN(n))
-        .sort((a, b) => a - b);
+      const finalSelected = getSelectedIdx();
       try {
         const res = await fetch('/api/fcpxml', {
           method: 'POST',

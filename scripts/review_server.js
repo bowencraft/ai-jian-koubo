@@ -207,6 +207,53 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // API: 保存 / 读取审核草稿（中途退出后继续）
+  if (req.method === 'GET' && req.url === '/api/draft') {
+    const draftPath = path.resolve('review_draft.json');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (!fs.existsSync(draftPath)) {
+      res.end(JSON.stringify({ success: true, draft: null }));
+      return;
+    }
+    try {
+      const draft = JSON.parse(fs.readFileSync(draftPath, 'utf8'));
+      res.end(JSON.stringify({ success: true, draft }));
+    } catch (err) {
+      res.end(JSON.stringify({ success: false, error: err.message, draft: null }));
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/draft') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}');
+        const selectedIdx = Array.isArray(parsed.selectedIdx)
+          ? parsed.selectedIdx
+              .map(n => Number(n))
+              .filter(n => Number.isInteger(n) && n >= 0 && n < reviewWords.length)
+              .sort((a, b) => a - b)
+          : [];
+        const draft = {
+          version: 1,
+          savedAt: new Date().toISOString(),
+          selectedIdx,
+          cutOpts: parsed.cutOpts && typeof parsed.cutOpts === 'object' ? parsed.cutOpts : null,
+          currentTime: Number.isFinite(Number(parsed.currentTime)) ? Number(parsed.currentTime) : 0,
+        };
+        fs.writeFileSync(path.resolve('review_draft.json'), JSON.stringify(draft, null, 2));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, savedAt: draft.savedAt, count: selectedIdx.length }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
   // API: 下载文件
   if (req.method === 'GET' && req.url.startsWith('/api/download/')) {
     const encodedFileName = req.url.replace('/api/download/', '');
