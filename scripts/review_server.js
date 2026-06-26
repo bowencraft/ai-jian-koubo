@@ -53,6 +53,11 @@ try {
   console.warn('⚠️ 读取 data.json 失败，导出时将无法生成 review_log.json（自进化学习日志）');
 }
 
+const reviewDuration = reviewWords.reduce((max, w) => {
+  const end = Number(w && w.end);
+  return Number.isFinite(end) && end > max ? end : max;
+}, 0);
+
 const projectSignature = crypto
   .createHash('sha256')
   .update(JSON.stringify({
@@ -151,6 +156,7 @@ const server = http.createServer((req, res) => {
           deleteList,
           silencePeriods,
           cutOpts,
+          durationHint: reviewDuration,
         });
 
         fs.writeFileSync(outputFcpxml, xml);

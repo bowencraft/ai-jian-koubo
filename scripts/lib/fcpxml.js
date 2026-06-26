@@ -31,26 +31,50 @@ function uuid() {
   });
 }
 
-// 用 ffprobe 探测视频元数据：时长、帧率（有理数）、宽高
-function probeVideo(videoFile) {
-  const duration = parseFloat(
-    execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "file:${videoFile}"`).toString().trim()
-  );
+const AUDIO_EXTS = new Set(['.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg']);
+
+// 用 ffprobe 探测媒体元数据；音频文件没有视频流，使用默认时间基准即可。
+function probeMedia(mediaFile, durationHint) {
+  const ext = path.extname(mediaFile).toLowerCase();
+  const isAudioOnly = AUDIO_EXTS.has(ext);
+  let duration = Number(durationHint) || 0;
+
+  try {
+    const probedDuration = parseFloat(
+      execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "file:${mediaFile}"`).toString().trim()
+    );
+    if (Number.isFinite(probedDuration) && probedDuration > 0) duration = probedDuration;
+  } catch (err) {
+    if (!duration) throw err;
+  }
+
+  if (isAudioOnly) {
+    return { duration, fpsNum: 30, fpsDen: 1, width: 1920, height: 1080, hasVideo: false };
+  }
 
   // 帧率为有理数，如 "30000/1001" = 29.97fps
-  const fpsRaw = execSync(
-    `ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "file:${videoFile}"`
-  ).toString().trim().replace(/,+$/, '');
-  const fpsParts = fpsRaw.split('/').map(Number);
-  const [fpsNum, fpsDen] = fpsParts.length === 2 ? fpsParts : [fpsParts[0], 1];
+  let fpsNum = 30;
+  let fpsDen = 1;
+  let width = 1920;
+  let height = 1080;
 
-  const sizeRaw = execSync(
-    `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "file:${videoFile}"`
-  ).toString().trim().split(',');
-  const width = parseInt(sizeRaw[0]) || 1920;
-  const height = parseInt(sizeRaw[1]) || 1080;
+  try {
+    const fpsRaw = execSync(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "file:${mediaFile}"`
+    ).toString().trim().replace(/,+$/, '');
+    const fpsParts = fpsRaw.split('/').map(Number);
+    [fpsNum, fpsDen] = fpsParts.length === 2 ? fpsParts : [fpsParts[0], 1];
 
-  return { duration, fpsNum, fpsDen, width, height };
+    const sizeRaw = execSync(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "file:${mediaFile}"`
+    ).toString().trim().split(',');
+    width = parseInt(sizeRaw[0]) || width;
+    height = parseInt(sizeRaw[1]) || height;
+  } catch (err) {
+    if (!durationHint) throw err;
+  }
+
+  return { duration, fpsNum, fpsDen, width, height, hasVideo: true };
 }
 
 /**
@@ -60,10 +84,11 @@ function probeVideo(videoFile) {
  * @param {number[]} o.deleteList      删除段（秒区间，见 compute_keeps）
  * @param {Array} o.silencePeriods     预计算静音段
  * @param {object} [o.cutOpts]         切割参数（padStart/padEnd 等）
+ * @param {number} [o.durationHint]    ffprobe 不可用时的媒体时长兜底
  * @returns {{ xml:string, outputPath:string, finalKeeps:Array, baseName:string }}
  */
-function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts }) {
-  const { duration, fpsNum, fpsDen, width, height } = probeVideo(videoFile);
+function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts, durationHint }) {
+  const { duration, fpsNum, fpsDen, width, height, hasVideo } = probeMedia(videoFile, durationHint);
 
   // ticks = 帧号 × fpsDen，分母为 fpsNum：对 29.97/30/24 等所有帧率都成立
   const toFCPTicks = (sec) => Math.round(sec * fpsNum / fpsDen) * fpsDen;
@@ -75,7 +100,7 @@ function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts }) {
   const baseName = path.basename(videoFile, path.extname(videoFile));
   const outputPath = path.resolve(`${baseName}_cut.fcpxml`);
 
-  const videoSrc = fileUri(path.resolve(videoFile));
+  const mediaSrc = fileUri(path.resolve(videoFile));
   const fcpxmlSrc = fileUri(outputPath);
 
   // asset 时长用音频采样率（48000）做分母
@@ -90,7 +115,8 @@ function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts }) {
     const durTicks = toFCPTicks(seg.end - seg.start);
     const offsetTicks = timelineOffsetTicks;
     timelineOffsetTicks += durTicks;
-    return `            <asset-clip name="${baseName}" offset="${offsetTicks}/${fpsNum}s" ref="r1" start="${startTicks}/${fpsNum}s" duration="${durTicks}/${fpsNum}s" audioRole="dialogue" format="r2" tcFormat="NDF" />`;
+    const formatAttr = hasVideo ? ' format="r2"' : '';
+    return `            <asset-clip name="${baseName}" offset="${offsetTicks}/${fpsNum}s" ref="r1" start="${startTicks}/${fpsNum}s" duration="${durTicks}/${fpsNum}s" audioRole="dialogue"${formatAttr} tcFormat="NDF" />`;
   }).join('\n');
 
   const totalTicks = timelineOffsetTicks;
@@ -99,7 +125,7 @@ function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts }) {
 <fcpxml version="1.8">
   <resources>
     <format id="r2" frameDuration="${frameDuration}" width="${width}" height="${height}" colorSpace="1-1-1 (Rec. 709)" />
-    <asset id="r1" name="${baseName}" src="${videoSrc}" start="0/1s" duration="${assetDurationNum}/${audioRate}s" format="r2" hasAudio="1" hasVideo="1" audioSources="1" audioChannels="2" audioRate="48k" />
+    <asset id="r1" name="${baseName}" src="${mediaSrc}" start="0/1s" duration="${assetDurationNum}/${audioRate}s"${hasVideo ? ' format="r2" hasVideo="1"' : ' hasVideo="0"'} hasAudio="1" audioSources="1" audioChannels="2" audioRate="48k" />
   </resources>
   <library location="${fcpxmlSrc}">
     <event name="${baseName}_剪辑" uid="${uuid()}">
