@@ -34,7 +34,7 @@
 - [x] Add an editor page for assets and clips.
 - [x] Support direct numeric edits plus basic timeline drag/trim.
 - [x] Add a review-page entry back to the editor.
-- [ ] Add richer in-browser preview where topmost video clip is visible and all audio clips play together.
+- [x] Add richer in-browser preview where topmost video clip is visible and all audio clips play together.
 
 ### Task 3: Mixed Audio Transcription
 
@@ -47,7 +47,7 @@
 - [x] Render audible clips into `review_mix.mp3` with ffmpeg.
 - [x] Reuse existing Volcengine ASR scripts on the mixed audio.
 - [x] Document single-source and multitrack transcription paths.
-- [ ] Add a first-class pre-transcription project server command for starting page 1 before `data.json` exists.
+- [x] Add a first-class pre-transcription project server command for starting page 1 before `data.json` exists.
 
 ### Task 4: Read-Only Review Timeline
 

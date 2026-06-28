@@ -7,7 +7,7 @@
  * 2. POST /api/fcpxml - 接收删除列表，导出 FCPXML 工程文件（可导入剪映 / Final Cut Pro）
  *
  * 用法: node review_server.js [port] [video_file]
- * 必须: video_file（无默认值，会检查文件是否存在）
+ * video_file 可选：没有转录/审核数据时，服务会把根路径指向 editor.html，作为项目启动器。
  */
 
 const http = require('http');
@@ -20,13 +20,7 @@ const { createLegacyProject, normalizeProject } = require('./lib/timeline_projec
 const PORT = process.argv[2] || 8899;
 const VIDEO_FILE = process.argv[3];
 
-if (!VIDEO_FILE) {
-  console.error('❌ 错误: 必须指定视频文件路径');
-  console.error('用法: node review_server.js [port] [video_file]');
-  process.exit(1);
-}
-
-if (!fs.existsSync(VIDEO_FILE)) {
+if (VIDEO_FILE && !fs.existsSync(VIDEO_FILE)) {
   console.error(`❌ 错误: 视频文件不存在: ${VIDEO_FILE}`);
   process.exit(1);
 }
@@ -64,6 +58,9 @@ const PROJECT_FILE = path.resolve('project.json');
 function readProject() {
   if (fs.existsSync(PROJECT_FILE)) {
     return normalizeProject(JSON.parse(fs.readFileSync(PROJECT_FILE, 'utf8')));
+  }
+  if (!VIDEO_FILE) {
+    return normalizeProject({ version: 1, name: path.basename(process.cwd()), assets: [], clips: [] });
   }
   const legacyProject = createLegacyProject({ videoFile: VIDEO_FILE, duration: reviewDuration });
   fs.writeFileSync(PROJECT_FILE, JSON.stringify(legacyProject, null, 2));
@@ -107,8 +104,35 @@ const MIME_TYPES = {
   '.css': 'text/css',
   '.json': 'application/json',
   '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.wav': 'audio/wav',
   '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
 };
+
+function streamFile(req, res, filePath, contentType) {
+  const stat = fs.statSync(filePath);
+  if (req.headers.range) {
+    const range = req.headers.range.replace('bytes=', '').split('-');
+    const start = parseInt(range[0], 10);
+    const end = range[1] ? parseInt(range[1], 10) : stat.size - 1;
+    res.writeHead(206, {
+      'Content-Type': contentType,
+      'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': end - start + 1,
+    });
+    fs.createReadStream(filePath, { start, end }).pipe(res);
+    return;
+  }
+  res.writeHead(200, {
+    'Content-Type': contentType,
+    'Content-Length': stat.size,
+    'Accept-Ranges': 'bytes',
+  });
+  fs.createReadStream(filePath).pipe(res);
+}
 
 const server = http.createServer((req, res) => {
   // CORS
@@ -147,6 +171,25 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url.startsWith('/media/')) {
+    try {
+      timelineProject = readProject();
+      const assetId = decodeURIComponent(req.url.replace('/media/', '').split('?')[0]);
+      const asset = timelineProject.assets.find(a => a.id === assetId);
+      if (!asset || !asset.path || !fs.existsSync(asset.path)) {
+        res.writeHead(404);
+        res.end('Media not found');
+        return;
+      }
+      const ext = path.extname(asset.path).toLowerCase();
+      streamFile(req, res, asset.path, MIME_TYPES[ext] || 'application/octet-stream');
+    } catch (err) {
+      res.writeHead(500);
+      res.end(err.message);
+    }
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/api/project') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -171,29 +214,9 @@ const server = http.createServer((req, res) => {
       res.end('Video not found');
       return;
     }
-    const stat = fs.statSync(VIDEO_FILE);
     const ext = path.extname(VIDEO_FILE).toLowerCase();
-    const contentType = ext === '.mp4' ? 'video/mp4' : ext === '.mov' ? 'video/quicktime' : 'video/mp4';
-
-    if (req.headers.range) {
-      const range = req.headers.range.replace('bytes=', '').split('-');
-      const start = parseInt(range[0], 10);
-      const end = range[1] ? parseInt(range[1], 10) : stat.size - 1;
-      res.writeHead(206, {
-        'Content-Type': contentType,
-        'Content-Range': `bytes ${start}-${end}/${stat.size}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': end - start + 1,
-      });
-      fs.createReadStream(VIDEO_FILE, { start, end }).pipe(res);
-    } else {
-      res.writeHead(200, {
-        'Content-Type': contentType,
-        'Content-Length': stat.size,
-        'Accept-Ranges': 'bytes',
-      });
-      fs.createReadStream(VIDEO_FILE).pipe(res);
-    }
+    const contentType = MIME_TYPES[ext] || 'video/mp4';
+    streamFile(req, res, VIDEO_FILE, contentType);
     return;
   }
 
@@ -380,7 +403,8 @@ const server = http.createServer((req, res) => {
   }
 
   // 静态文件服务（从当前目录读取）
-  let filePath = req.url === '/' ? '/review.html' : req.url;
+  const defaultPage = fs.existsSync('data.json') && fs.existsSync('review.html') ? '/review.html' : '/editor.html';
+  let filePath = req.url === '/' ? defaultPage : req.url;
   filePath = '.' + filePath;
 
   const ext = path.extname(filePath);
@@ -393,32 +417,14 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  const stat = fs.statSync(filePath);
-
   // 支持 Range 请求（音频/视频拖动）
-  if (req.headers.range && (ext === '.mp3' || ext === '.mp4')) {
-    const range = req.headers.range.replace('bytes=', '').split('-');
-    const start = parseInt(range[0], 10);
-    const end = range[1] ? parseInt(range[1], 10) : stat.size - 1;
-
-    res.writeHead(206, {
-      'Content-Type': contentType,
-      'Content-Range': `bytes ${start}-${end}/${stat.size}`,
-      'Accept-Ranges': 'bytes',
-      'Content-Length': end - start + 1,
-    });
-
-    fs.createReadStream(filePath, { start, end }).pipe(res);
+  if (req.headers.range && ['.mp3', '.mp4', '.m4a', '.mov', '.wav', '.aac'].includes(ext)) {
+    streamFile(req, res, filePath, contentType);
     return;
   }
 
   // 普通请求
-  res.writeHead(200, {
-    'Content-Type': contentType,
-    'Content-Length': stat.size,
-    'Accept-Ranges': 'bytes'
-  });
-  fs.createReadStream(filePath).pipe(res);
+  streamFile(req, res, filePath, contentType);
 });
 
 server.listen(PORT, () => {

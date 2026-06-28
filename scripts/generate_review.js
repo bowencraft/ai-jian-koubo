@@ -90,6 +90,10 @@ if (fs.existsSync(templateSrc)) {
   console.error('❌ 找不到模板: ' + templateSrc);
   process.exit(1);
 }
+['review.css', 'review.js'].forEach((file) => {
+  const src = path.join(__dirname, 'templates', file);
+  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(outDir, file));
+});
 
 const editorTemplateSrc = path.join(__dirname, 'templates', 'editor.html');
 const editorTemplateDst = path.join(outDir, 'editor.html');
@@ -97,6 +101,10 @@ if (fs.existsSync(editorTemplateSrc)) {
   fs.copyFileSync(editorTemplateSrc, editorTemplateDst);
   console.log('已生成 editor.html（来自模板）');
 }
+['editor.css', 'editor.js'].forEach((file) => {
+  const src = path.join(__dirname, 'templates', file);
+  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(outDir, file));
+});
 
 // ── 静音检测（供 FCPXML 导出使用）──────────────────────────
 const SILENCE_MIN_DUR = 0.2;

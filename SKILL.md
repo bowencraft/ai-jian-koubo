@@ -43,8 +43,10 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 2. 将 project.json 中启用音频的 clips 合成为审核音频，再转录
 
 模式 A（剪口播）:
-  0A. 素材编辑页：assets[] + clips[]，可拖动、对齐、修剪、增删素材
-      预览规则：视频只预览当前时间最顶部有视频的轨道；音频轨道全部播放/混合
+  0A. 素材编辑页：用 serve_project.sh 在转文字前打开页面 1，管理 assets[] + clips[]
+      布局：左上素材库、右上预览、时间线上方片段属性、下方多轨时间线
+      操作：弹窗新增素材；从素材库拖到轨道新增片段；可拖动、对齐、修剪、增删素材
+      预览规则：视频只预览当前时间最顶部有视频的轨道；音频轨道全部同步播放
       旧单素材项目：启动审核服务时自动迁移成 1 asset + 1 clip，可回编辑页继续改
   1-4. 单素材用 run_transcribe.sh；多轨用 run_multitrack_transcribe.sh 先渲染 review_mix.mp3 再转录（自动）
   5.1 gen_analysis.js
@@ -149,7 +151,14 @@ bash "$SKILL_DIR/scripts/run_transcribe.sh" "$VIDEO_PATH" "$BASE_DIR"
 
 **多轨/剪播客流程：**
 
-先在 `BASE_DIR/project.json` 保存多轨项目：
+先启动页面 1，让用户在浏览器里拼素材：
+
+```bash
+bash "$SKILL_DIR/scripts/serve_project.sh" \
+  "$BASE_DIR" "$SKILL_DIR/scripts/review_server.js"
+```
+
+用户在页面保存后，会得到/更新 `BASE_DIR/project.json`。也可以手写多轨项目：
 
 ```json
 {
