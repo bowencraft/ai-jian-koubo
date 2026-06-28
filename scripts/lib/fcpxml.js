@@ -14,6 +14,12 @@
 const path = require('path');
 const { execSync } = require('child_process');
 const { computeFinalKeeps } = require('./compute_keeps');
+const {
+  normalizeProject,
+  createLegacyProject,
+  applyTimelineDeletes,
+  getProjectDuration,
+} = require('./timeline_project');
 
 // 把绝对路径编码成 file:// URI（保留路径分隔符与安全字符，其余百分号编码）
 function fileUri(absPath) {
@@ -29,6 +35,14 @@ function uuid() {
     const v = c === 'x' ? r : (r & 0x3 | 0x8);
     return v.toString(16);
   });
+}
+
+function xmlAttr(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 const AUDIO_EXTS = new Set(['.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg']);
@@ -75,6 +89,104 @@ function probeMedia(mediaFile, durationHint) {
   }
 
   return { duration, fpsNum, fpsDen, width, height, hasVideo: true };
+}
+
+function inverseKeeps(finalKeeps, duration) {
+  const deletes = [];
+  let cursor = 0;
+  finalKeeps
+    .slice()
+    .sort((a, b) => a.start - b.start)
+    .forEach((keep) => {
+      if (keep.start > cursor) deletes.push({ start: cursor, end: keep.start });
+      cursor = Math.max(cursor, keep.end);
+    });
+  if (cursor < duration) deletes.push({ start: cursor, end: duration });
+  return deletes;
+}
+
+function collapsedTime(time, deletes) {
+  let removed = 0;
+  deletes.forEach((range) => {
+    if (range.end <= time) removed += range.end - range.start;
+    else if (range.start < time) removed += time - range.start;
+  });
+  return Math.max(0, time - removed);
+}
+
+function buildTimelineFcpxml({ project, deleteList, silencePeriods, cutOpts, durationHint, outputPath }) {
+  const normalized = normalizeProject(project);
+  const projectDuration = Math.max(getProjectDuration(normalized), Number(durationHint) || 0);
+  const finalKeeps = computeFinalKeeps(deleteList || [], silencePeriods || [], projectDuration, cutOpts || {});
+  const effectiveDeletes = inverseKeeps(finalKeeps, projectDuration);
+
+  const assetMetas = normalized.assets.map((asset, index) => {
+    const media = probeMedia(asset.path, asset.duration || durationHint || projectDuration);
+    return {
+      ...asset,
+      resourceId: `r${index + 1}`,
+      media,
+    };
+  });
+  const assetById = new Map(assetMetas.map(asset => [asset.id, asset]));
+  const firstVideo = assetMetas.find(asset => asset.media.hasVideo);
+  const formatMedia = firstVideo ? firstVideo.media : { fpsNum: 30, fpsDen: 1, width: 1920, height: 1080 };
+  const fpsNum = formatMedia.fpsNum;
+  const fpsDen = formatMedia.fpsDen;
+  const toFCPTicks = (sec) => Math.round(sec * fpsNum / fpsDen) * fpsDen;
+  const frameDuration = `${fpsDen}/${fpsNum}s`;
+  const audioRate = 48000;
+
+  const finalClips = applyTimelineDeletes(normalized, effectiveDeletes)
+    .map(clip => ({
+      ...clip,
+      asset: assetById.get(clip.assetId),
+      timelineStart: collapsedTime(clip.timelineStart, effectiveDeletes),
+    }))
+    .filter(clip => clip.asset && clip.duration > 0);
+
+  const resources = assetMetas.map((asset) => {
+    const assetDuration = Math.max(asset.media.duration || 0, asset.duration || 0, projectDuration);
+    const assetDurationNum = Math.round(assetDuration * audioRate);
+    const formatAttr = asset.media.hasVideo ? ' format="rfmt"' : '';
+    const videoAttrs = asset.media.hasVideo ? ' hasVideo="1"' : ' hasVideo="0"';
+    return `    <asset id="${asset.resourceId}" name="${xmlAttr(asset.name)}" src="${xmlAttr(fileUri(path.resolve(asset.path)))}" start="0/1s" duration="${assetDurationNum}/${audioRate}s"${formatAttr}${videoAttrs} hasAudio="${asset.hasAudio ? '1' : '0'}" audioSources="1" audioChannels="2" audioRate="48k" />`;
+  }).join('\n');
+
+  const clips = finalClips.map((clip) => {
+    const asset = clip.asset;
+    const offsetTicks = toFCPTicks(clip.timelineStart);
+    const startTicks = toFCPTicks(clip.sourceStart);
+    const durTicks = toFCPTicks(clip.duration);
+    const laneAttr = clip.lane ? ` lane="${clip.lane}"` : '';
+    const formatAttr = asset.media.hasVideo ? ' format="rfmt"' : '';
+    return `            <asset-clip name="${xmlAttr(asset.name)}" offset="${offsetTicks}/${fpsNum}s"${laneAttr} ref="${asset.resourceId}" start="${startTicks}/${fpsNum}s" duration="${durTicks}/${fpsNum}s" audioRole="${xmlAttr(clip.audioRole)}"${formatAttr} tcFormat="NDF" />`;
+  }).join('\n');
+
+  const baseName = normalized.name || 'multitrack_project';
+  const resolvedOutput = path.resolve(outputPath || `${baseName}_cut.fcpxml`);
+  const totalTicks = toFCPTicks(finalKeeps.reduce((sum, keep) => sum + Math.max(0, keep.end - keep.start), 0));
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.8">
+  <resources>
+    <format id="rfmt" frameDuration="${frameDuration}" width="${formatMedia.width}" height="${formatMedia.height}" colorSpace="1-1-1 (Rec. 709)" />
+${resources}
+  </resources>
+  <library location="${xmlAttr(fileUri(resolvedOutput))}">
+    <event name="${xmlAttr(baseName)}_剪辑" uid="${uuid()}">
+      <project name="${xmlAttr(baseName)}_cut" uid="${uuid()}">
+        <sequence duration="${totalTicks}/${fpsNum}s" format="rfmt" tcStart="0/1s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+          <spine>
+${clips}
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>`;
+
+  return { xml, outputPath: resolvedOutput, finalKeeps, finalClips, baseName };
 }
 
 /**
@@ -143,4 +255,4 @@ ${clips}
   return { xml, outputPath, finalKeeps, baseName };
 }
 
-module.exports = { buildFcpxml };
+module.exports = { buildFcpxml, buildTimelineFcpxml };

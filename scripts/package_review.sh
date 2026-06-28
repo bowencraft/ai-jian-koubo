@@ -60,6 +60,8 @@ copy_if_exists() {
 cp "$REVIEW_DIR/review.html" "$PACKAGE_DIR/review/review.html"
 cp "$REVIEW_DIR/data.json" "$PACKAGE_DIR/review/data.json"
 cp "$REVIEW_DIR/audio.mp3" "$PACKAGE_DIR/review/audio.mp3"
+copy_if_exists "$REVIEW_DIR/editor.html" "$PACKAGE_DIR/review/editor.html"
+copy_if_exists "$REVIEW_DIR/project.json" "$PACKAGE_DIR/review/project.json"
 copy_if_exists "$REVIEW_DIR/review_draft.json" "$PACKAGE_DIR/review/review_draft.json"
 copy_if_exists "$REVIEW_DIR/peaks.json" "$PACKAGE_DIR/review/peaks.json"
 copy_if_exists "$REVIEW_DIR/silence_periods.json" "$PACKAGE_DIR/review/silence_periods.json"
@@ -68,6 +70,7 @@ cp "$SCRIPT_DIR/review_server.js" "$PACKAGE_DIR/server/review_server.js"
 cp "$SCRIPT_DIR/lib/compute_keeps.js" "$PACKAGE_DIR/server/lib/compute_keeps.js"
 cp "$SCRIPT_DIR/lib/fcpxml.js" "$PACKAGE_DIR/server/lib/fcpxml.js"
 cp "$SCRIPT_DIR/lib/refine_boundaries.js" "$PACKAGE_DIR/server/lib/refine_boundaries.js"
+cp "$SCRIPT_DIR/lib/timeline_project.js" "$PACKAGE_DIR/server/lib/timeline_project.js"
 
 cat > "$PACKAGE_DIR/start.sh" <<'EOF'
 #!/bin/bash
@@ -122,7 +125,7 @@ PORT=8901 bash start.sh
 
 ## Contents
 
-- `review/` contains the current review page, transcript JSON, audio, and optional saved progress.
+- `review/` contains the current review page, optional multitrack editor/project JSON, transcript JSON, audio, and optional saved progress.
 - `server/` contains the local Node backend needed for saving progress and exporting FCPXML.
 
 Do not open `review/review.html` directly with `file://`; use the local server above.

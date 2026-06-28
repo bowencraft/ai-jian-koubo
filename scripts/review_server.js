@@ -14,7 +14,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { buildFcpxml } = require('./lib/fcpxml');
+const { buildFcpxml, buildTimelineFcpxml } = require('./lib/fcpxml');
+const { createLegacyProject, normalizeProject } = require('./lib/timeline_project');
 
 const PORT = process.argv[2] || 8899;
 const VIDEO_FILE = process.argv[3];
@@ -57,6 +58,35 @@ const reviewDuration = reviewWords.reduce((max, w) => {
   const end = Number(w && w.end);
   return Number.isFinite(end) && end > max ? end : max;
 }, 0);
+
+const PROJECT_FILE = path.resolve('project.json');
+
+function readProject() {
+  if (fs.existsSync(PROJECT_FILE)) {
+    return normalizeProject(JSON.parse(fs.readFileSync(PROJECT_FILE, 'utf8')));
+  }
+  const legacyProject = createLegacyProject({ videoFile: VIDEO_FILE, duration: reviewDuration });
+  fs.writeFileSync(PROJECT_FILE, JSON.stringify(legacyProject, null, 2));
+  return legacyProject;
+}
+
+function writeProject(project) {
+  const normalized = normalizeProject(project);
+  fs.writeFileSync(PROJECT_FILE, JSON.stringify({
+    ...normalized,
+    updatedAt: new Date().toISOString(),
+  }, null, 2));
+  return normalized;
+}
+
+let timelineProject;
+try {
+  timelineProject = readProject();
+  console.log('🎛️ 项目时间线: ' + timelineProject.assets.length + ' 素材 / ' + timelineProject.clips.length + ' 片段');
+} catch (e) {
+  console.warn('⚠️ project.json 读取/迁移失败，多轨导出将回退单素材: ' + e.message);
+  timelineProject = null;
+}
 
 const projectSignature = crypto
   .createHash('sha256')
@@ -105,6 +135,35 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url === '/api/project') {
+    try {
+      timelineProject = readProject();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, project: timelineProject, reviewDuration }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/project') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}');
+        timelineProject = writeProject(parsed.project || parsed);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, project: timelineProject }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
   // 视频文件代理（原始视频不在当前目录时使用）
   if (req.method === 'GET' && req.url.startsWith('/video')) {
     if (!VIDEO_FILE || !fs.existsSync(VIDEO_FILE)) {
@@ -150,14 +209,24 @@ const server = http.createServer((req, res) => {
         const cutOpts = (parsed && !Array.isArray(parsed) && parsed.opts) ? parsed.opts : undefined;
         const finalSelected = (parsed && !Array.isArray(parsed) && Array.isArray(parsed.finalSelected)) ? parsed.finalSelected : null;
 
-        // FCPXML 生成（含 ffprobe 探测 + 切割算法）抽到 lib/fcpxml.js，便于单测
-        const { xml, outputPath: outputFcpxml, finalKeeps, baseName } = buildFcpxml({
-          videoFile: VIDEO_FILE,
-          deleteList,
-          silencePeriods,
-          cutOpts,
-          durationHint: reviewDuration,
-        });
+        // FCPXML 生成（含 ffprobe 探测 + 切割算法）抽到 lib/fcpxml.js，便于单测。
+        // 有 project.json 时导出原始多轨素材；没有/失败时保持旧单素材导出。
+        const built = timelineProject
+          ? buildTimelineFcpxml({
+              project: timelineProject,
+              deleteList,
+              silencePeriods,
+              cutOpts,
+              durationHint: reviewDuration,
+            })
+          : buildFcpxml({
+              videoFile: VIDEO_FILE,
+              deleteList,
+              silencePeriods,
+              cutOpts,
+              durationHint: reviewDuration,
+            });
+        const { xml, outputPath: outputFcpxml, finalKeeps, baseName } = built;
 
         fs.writeFileSync(outputFcpxml, xml);
         console.log(`✅ 导出 FCPXML: ${outputFcpxml} (${finalKeeps.length} 片段)`);

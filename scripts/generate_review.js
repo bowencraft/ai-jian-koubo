@@ -52,6 +52,20 @@ const data = {
   autoSelected,
   generatedAt: new Date().toISOString()
 };
+
+const projectFile = path.join(outDir, 'project.json');
+const parentProjectFile = path.join(path.dirname(outDir), 'project.json');
+if (!fs.existsSync(projectFile) && fs.existsSync(parentProjectFile)) {
+  fs.copyFileSync(parentProjectFile, projectFile);
+  console.log('已复制多轨项目: project.json');
+}
+if (fs.existsSync(projectFile)) {
+  try {
+    data.project = JSON.parse(fs.readFileSync(projectFile, 'utf8'));
+  } catch (e) {
+    console.warn('⚠️  project.json 格式错误，审核页将不显示多轨项目: ' + e.message);
+  }
+}
 fs.writeFileSync(path.join(outDir, 'data.json'), JSON.stringify(data, null, 2));
 console.log('已生成 data.json');
 
@@ -75,6 +89,13 @@ if (fs.existsSync(templateSrc)) {
 } else {
   console.error('❌ 找不到模板: ' + templateSrc);
   process.exit(1);
+}
+
+const editorTemplateSrc = path.join(__dirname, 'templates', 'editor.html');
+const editorTemplateDst = path.join(outDir, 'editor.html');
+if (fs.existsSync(editorTemplateSrc)) {
+  fs.copyFileSync(editorTemplateSrc, editorTemplateDst);
+  console.log('已生成 editor.html（来自模板）');
 }
 
 // ── 静音检测（供 FCPXML 导出使用）──────────────────────────

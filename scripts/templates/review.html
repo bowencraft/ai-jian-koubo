@@ -340,6 +340,55 @@
     }
     .dock-resizer:hover::after,
     .dock-resizer.dragging::after { background: var(--ember); }
+    .project-tracks {
+      display: none;
+      max-height: 132px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      margin: 2px 0 8px;
+      background: rgba(255,255,255,.04);
+    }
+    .project-track {
+      position: relative;
+      height: 30px;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+    }
+    .project-track:last-child { border-bottom: 0; }
+    .project-track-label {
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 68px;
+      padding: 8px 8px 0;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--paper-400);
+      background: rgba(14,14,19,.88);
+      border-right: 1px solid rgba(255,255,255,.1);
+      z-index: 2;
+    }
+    .project-clip {
+      position: absolute;
+      top: 5px;
+      height: 20px;
+      min-width: 12px;
+      border-radius: 4px;
+      border: 1px solid rgba(108,160,255,.56);
+      background: rgba(108,160,255,.26);
+      color: var(--paper-100);
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 18px;
+      padding: 0 5px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    .project-clip.audio {
+      border-color: rgba(52,211,153,.56);
+      background: rgba(52,211,153,.2);
+    }
     #rulerCanvas {
       display: block;
       width: 100%;
@@ -831,6 +880,7 @@
       <span class="time-display"><span id="timeCur">00:00</span><span class="sep">/</span><span id="timeTot">00:00</span></span>
     </div>
     <div class="tb-right">
+      <button class="ghost" onclick="location.href='/editor.html'" title="回到素材编辑页调整多轨时间线">素材编辑</button>
       <button class="ghost" onclick="saveDraft()" title="保存当前勾选状态到本地 review_draft.json">保存进度</button>
       <button class="ghost" onclick="exportDraft()" title="把当前进度下载为 JSON 文件">导出进度</button>
       <button class="ghost" onclick="document.getElementById('draftImport').click()" title="导入之前导出的进度 JSON">导入进度</button>
@@ -921,11 +971,13 @@
     <!-- 底部全宽时间线 -->
     <div class="timeline-dock">
       <div class="dock-resizer" id="dockResizer" title="拖动调整波形高度"></div>
+      <div class="project-tracks" id="projectTracks"></div>
       <div class="tl-status">
         <div class="wave-legend">
           <span class="wl"><span class="sw" id="lg-silence"></span>静音</span>
           <span class="wl"><span class="sw" id="lg-del"></span>选中删除</span>
           <span class="wl"><span class="sw" id="lg-cut"></span>额外切掉</span>
+          <span class="wl" id="projectSummary"></span>
         </div>
         <span class="sstat">总时长 <b id="tl-total">--:--</b></span>
         <span class="sstat sstat-final">剪后 <b id="tl-final">--:--</b></span>
@@ -1005,14 +1057,16 @@
         markSegsDirty();
 
         // 并行加载波形包络 + 静音段（任一缺失都不阻塞主流程）
-        const [pk, sp, draftResp] = await Promise.all([
+        const [pk, sp, draftResp, projectResp] = await Promise.all([
           fetchJSON('./peaks.json'),
           fetchJSON('./silence_periods.json'),
-          fetchJSON('/api/draft')
+          fetchJSON('/api/draft'),
+          fetchJSON('/api/project')
         ]);
         peaksData = (pk && Array.isArray(pk.peaks)) ? pk : null;
         silencePeriods = Array.isArray(sp) ? sp.slice().sort((a, b) => a.start - b.start) : [];
         currentProjectSignature = draftResp && draftResp.projectSignature ? draftResp.projectSignature : null;
+        renderProjectSummary(projectResp && projectResp.project);
         const restored = applyDraft(draftResp && draftResp.draft);
 
         initWave();
@@ -1032,6 +1086,40 @@
         document.getElementById('loadingLabel').textContent = '数据加载失败';
         document.getElementById('loadingTime').textContent = err.message;
       });
+
+    function renderProjectSummary(project) {
+      const el = document.getElementById('projectSummary');
+      if (!el || !project || !Array.isArray(project.assets) || !Array.isArray(project.clips)) return;
+      const trackCount = project.clips.reduce((max, clip) => Math.max(max, Number(clip.trackIndex || clip.lane || 0) + 1), 0);
+      el.textContent = `多轨 ${project.assets.length} 素材 / ${trackCount || 1} 轨`;
+      renderProjectTracks(project, trackCount || 1);
+    }
+
+    function renderProjectTracks(project, trackCount) {
+      const root = document.getElementById('projectTracks');
+      if (!root) return;
+      const duration = Math.max(
+        words.reduce((max, w) => Math.max(max, Number(w.end) || 0), 0),
+        project.clips.reduce((max, clip) => Math.max(max, Number(clip.timelineStart || 0) + Number(clip.duration || 0)), 0),
+        1
+      );
+      const assets = new Map(project.assets.map(asset => [asset.id, asset]));
+      const rows = [];
+      for (let t = 0; t < trackCount; t++) {
+        const clips = project.clips
+          .filter(clip => Number(clip.trackIndex || clip.lane || 0) === t)
+          .map(clip => {
+            const asset = assets.get(clip.assetId) || { name: 'missing', kind: 'audio' };
+            const leftPct = (Number(clip.timelineStart || 0) / duration) * 100;
+            const widthPct = Math.max(1, (Number(clip.duration || 0) / duration) * 100);
+            const kind = asset.kind === 'video' || asset.hasVideo ? 'video' : 'audio';
+            return `<div class="project-clip ${kind}" style="left:calc(68px + ${leftPct}%);width:calc(${widthPct}% - 2px)">${asset.name || asset.id}</div>`;
+          }).join('');
+        rows.push(`<div class="project-track"><div class="project-track-label">轨 ${t + 1}</div>${clips}</div>`);
+      }
+      root.innerHTML = rows.join('');
+      root.style.display = rows.length ? 'block' : 'none';
+    }
 
     function togglePlay()  { clearPreview(); video.paused ? video.play() : video.pause(); }
     function setSpeed(v)   { video.playbackRate = v; }

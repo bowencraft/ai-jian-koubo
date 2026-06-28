@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>素材编辑 / Multitrack</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1f2430;
+      --muted: #6d7480;
+      --line: #d9dee7;
+      --paper: #f7f3ea;
+      --panel: #fffaf0;
+      --blue: #2540ff;
+      --orange: #ff7a4d;
+      --green: #127a5a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--paper);
+      color: var(--ink);
+    }
+    .topbar {
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 250, 240, .96);
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+    .brand { font-weight: 800; letter-spacing: .02em; }
+    .brand em { color: var(--blue); font-style: normal; }
+    .actions { display: flex; gap: 8px; align-items: center; }
+    button, input, select {
+      font: inherit;
+      border: 1px solid var(--line);
+      background: white;
+      color: var(--ink);
+      border-radius: 6px;
+      min-height: 34px;
+    }
+    button { padding: 0 12px; cursor: pointer; }
+    button.primary { background: var(--blue); color: white; border-color: var(--blue); }
+    button.warn { background: var(--orange); color: white; border-color: var(--orange); }
+    main {
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      min-height: calc(100vh - 56px);
+    }
+    aside {
+      border-right: 1px solid var(--line);
+      padding: 14px;
+      background: #fff8eb;
+      overflow: auto;
+    }
+    .stage {
+      min-width: 0;
+      padding: 14px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 12px;
+    }
+    h2 { font-size: 14px; margin: 0 0 10px; text-transform: uppercase; color: var(--muted); }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    input, select { width: 100%; padding: 6px 8px; }
+    .grid { display: grid; grid-template-columns: 1fr 88px; gap: 8px; }
+    .stack { display: grid; gap: 10px; margin-bottom: 18px; }
+    .asset-list, .clip-list {
+      display: grid;
+      gap: 8px;
+    }
+    .item {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 8px;
+    }
+    .item-title { display: flex; justify-content: space-between; gap: 8px; font-weight: 700; font-size: 13px; }
+    .item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); margin-top: 4px; }
+    .clip-fields {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .status {
+      font-size: 12px;
+      color: var(--muted);
+      min-width: 260px;
+      text-align: right;
+    }
+    .notice {
+      border: 1px solid #f0c36a;
+      background: #fff2c7;
+      color: #6d4d00;
+      border-radius: 8px;
+      padding: 10px 12px;
+      display: none;
+    }
+    .timeline-shell {
+      border: 1px solid var(--line);
+      background: white;
+      border-radius: 8px;
+      overflow: hidden;
+      min-height: 420px;
+    }
+    .ruler {
+      height: 34px;
+      background: #f3f5f8;
+      border-bottom: 1px solid var(--line);
+      position: relative;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .tick {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      border-left: 1px solid #cfd5df;
+      padding-left: 4px;
+      line-height: 32px;
+    }
+    .tracks { position: relative; min-height: 380px; }
+    .track {
+      height: 72px;
+      border-bottom: 1px solid var(--line);
+      position: relative;
+      background: linear-gradient(90deg, rgba(37,64,255,.05), transparent);
+    }
+    .track-label {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 76px;
+      padding: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      border-right: 1px solid var(--line);
+      background: rgba(255,255,255,.82);
+      z-index: 2;
+    }
+    .clip {
+      position: absolute;
+      top: 12px;
+      height: 46px;
+      border-radius: 6px;
+      border: 1px solid rgba(37,64,255,.45);
+      background: rgba(37,64,255,.16);
+      color: var(--ink);
+      padding: 6px 8px;
+      overflow: hidden;
+      cursor: grab;
+      user-select: none;
+      min-width: 22px;
+    }
+    .clip[data-kind="audio"] {
+      border-color: rgba(18,122,90,.45);
+      background: rgba(18,122,90,.15);
+    }
+    .clip:active { cursor: grabbing; }
+    .clip b { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .clip span { font-size: 11px; color: var(--muted); }
+    .handle {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 8px;
+      background: rgba(0,0,0,.1);
+      cursor: ew-resize;
+    }
+    .handle.left { left: 0; }
+    .handle.right { right: 0; }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">素材<em>编辑</em></div>
+    <div class="actions">
+      <div class="status" id="status">加载中...</div>
+      <button onclick="location.href='/'">回到审核</button>
+      <button class="warn" onclick="markNeedsTranscript()">标记需重转文字</button>
+      <button class="primary" onclick="saveProject()">保存项目</button>
+    </div>
+  </div>
+  <main>
+    <aside>
+      <section class="stack">
+        <h2>新增素材</h2>
+        <div>
+          <label for="assetPath">本机素材绝对路径</label>
+          <input id="assetPath" placeholder="/Users/.../host.m4a">
+        </div>
+        <div class="grid">
+          <div>
+            <label for="assetName">名称</label>
+            <input id="assetName" placeholder="Host Mic">
+          </div>
+          <div>
+            <label for="assetKind">类型</label>
+            <select id="assetKind"><option value="audio">音频</option><option value="video">视频</option></select>
+          </div>
+        </div>
+        <button onclick="addAsset()">添加素材</button>
+      </section>
+
+      <section class="stack">
+        <h2>新增片段</h2>
+        <div>
+          <label for="clipAsset">素材</label>
+          <select id="clipAsset"></select>
+        </div>
+        <div class="clip-fields">
+          <div><label>时间线</label><input id="clipStart" type="number" min="0" step="0.1" value="0"></div>
+          <div><label>入点</label><input id="clipSource" type="number" min="0" step="0.1" value="0"></div>
+          <div><label>时长</label><input id="clipDuration" type="number" min="0.1" step="0.1" value="10"></div>
+          <div><label>轨道</label><input id="clipTrack" type="number" min="0" step="1" value="0"></div>
+        </div>
+        <button onclick="addClip()">添加片段</button>
+      </section>
+
+      <section class="stack">
+        <h2>素材</h2>
+        <div class="asset-list" id="assetList"></div>
+      </section>
+
+      <section class="stack">
+        <h2>片段精调</h2>
+        <div class="clip-list" id="clipList"></div>
+      </section>
+    </aside>
+
+    <section class="stage">
+      <div class="notice" id="staleNotice">项目已修改。回到审核页后，可以选择重新转文字和智能裁切，或继续沿用当前审核选择。</div>
+      <div class="timeline-shell">
+        <div class="ruler" id="ruler"></div>
+        <div class="tracks" id="tracks"></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    let project = { version: 1, name: 'multitrack_project', assets: [], clips: [] };
+    let reviewDuration = 0;
+    let dirty = false;
+    const pxPerSec = 34;
+    const labelWidth = 76;
+
+    const $ = id => document.getElementById(id);
+    const uid = prefix => prefix + '-' + Math.random().toString(16).slice(2, 10);
+    const num = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+    const assetById = () => new Map(project.assets.map(asset => [asset.id, asset]));
+
+    function setStatus(text) { $('status').textContent = text; }
+    function setDirty(value) {
+      dirty = value;
+      $('staleNotice').style.display = dirty ? 'block' : 'none';
+      setStatus(dirty ? '有未保存修改' : '已保存');
+    }
+
+    async function loadProject() {
+      const res = await fetch('/api/project');
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || '读取项目失败');
+      project = data.project;
+      reviewDuration = data.reviewDuration || 0;
+      render();
+      setDirty(false);
+    }
+
+    async function saveProject() {
+      const res = await fetch('/api/project', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project })
+      });
+      const data = await res.json();
+      if (!data.success) {
+        setStatus('保存失败: ' + data.error);
+        return;
+      }
+      project = data.project;
+      render();
+      setDirty(false);
+    }
+
+    function markNeedsTranscript() {
+      project.transcript = {
+        status: 'stale',
+        reason: 'timeline edited by human',
+        markedAt: new Date().toISOString()
+      };
+      setDirty(true);
+    }
+
+    function addAsset() {
+      const filePath = $('assetPath').value.trim();
+      if (!filePath) return;
+      const name = $('assetName').value.trim() || filePath.split('/').pop().replace(/\.[^.]+$/, '');
+      const kind = $('assetKind').value;
+      project.assets.push({
+        id: uid('asset'),
+        name,
+        path: filePath,
+        kind,
+        hasAudio: true,
+        hasVideo: kind === 'video',
+        duration: 0
+      });
+      $('assetPath').value = '';
+      $('assetName').value = '';
+      setDirty(true);
+      render();
+    }
+
+    function removeAsset(id) {
+      project.assets = project.assets.filter(asset => asset.id !== id);
+      project.clips = project.clips.filter(clip => clip.assetId !== id);
+      setDirty(true);
+      render();
+    }
+
+    function addClip() {
+      const assetId = $('clipAsset').value;
+      if (!assetId) return;
+      const trackIndex = Math.max(0, Math.floor(num($('clipTrack').value)));
+      project.clips.push({
+        id: uid('clip'),
+        assetId,
+        timelineStart: Math.max(0, num($('clipStart').value)),
+        sourceStart: Math.max(0, num($('clipSource').value)),
+        duration: Math.max(0.1, num($('clipDuration').value, 10)),
+        trackIndex,
+        lane: trackIndex,
+        audioRole: 'dialogue',
+        enabled: true
+      });
+      setDirty(true);
+      render();
+    }
+
+    function updateClip(id, patch) {
+      project.clips = project.clips.map(clip => clip.id === id ? { ...clip, ...patch } : clip);
+      setDirty(true);
+      render();
+    }
+
+    function removeClip(id) {
+      project.clips = project.clips.filter(clip => clip.id !== id);
+      setDirty(true);
+      render();
+    }
+
+    function projectDuration() {
+      return Math.max(reviewDuration, ...project.clips.map(c => num(c.timelineStart) + num(c.duration)));
+    }
+
+    function render() {
+      renderAssets();
+      renderClipSelect();
+      renderClipList();
+      renderTimeline();
+    }
+
+    function renderAssets() {
+      $('assetList').innerHTML = project.assets.map(asset => `
+        <div class="item">
+          <div class="item-title"><span>${escapeHtml(asset.name)}</span><button onclick="removeAsset('${asset.id}')">删除</button></div>
+          <small>${escapeHtml(asset.path)}</small>
+        </div>
+      `).join('') || '<div class="item"><small>还没有素材</small></div>';
+    }
+
+    function renderClipSelect() {
+      $('clipAsset').innerHTML = project.assets.map(asset => (
+        `<option value="${asset.id}">${escapeHtml(asset.name)}</option>`
+      )).join('');
+    }
+
+    function renderClipList() {
+      const assets = assetById();
+      $('clipList').innerHTML = project.clips.map(clip => {
+        const asset = assets.get(clip.assetId) || { name: 'missing' };
+        return `
+          <div class="item">
+            <div class="item-title"><span>${escapeHtml(asset.name)}</span><button onclick="removeClip('${clip.id}')">删除</button></div>
+            <div class="clip-fields">
+              <div><label>时间线</label><input type="number" step="0.1" value="${clip.timelineStart}" onchange="updateClip('${clip.id}', { timelineStart: Math.max(0, num(this.value)) })"></div>
+              <div><label>入点</label><input type="number" step="0.1" value="${clip.sourceStart}" onchange="updateClip('${clip.id}', { sourceStart: Math.max(0, num(this.value)) })"></div>
+              <div><label>时长</label><input type="number" step="0.1" value="${clip.duration}" onchange="updateClip('${clip.id}', { duration: Math.max(0.1, num(this.value)) })"></div>
+              <div><label>轨道</label><input type="number" step="1" value="${clip.trackIndex}" onchange="updateClip('${clip.id}', { trackIndex: Math.max(0, Math.floor(num(this.value))), lane: Math.max(0, Math.floor(num(this.value))) })"></div>
+            </div>
+          </div>
+        `;
+      }).join('') || '<div class="item"><small>还没有片段</small></div>';
+    }
+
+    function renderTimeline() {
+      const duration = Math.max(20, Math.ceil(projectDuration()));
+      $('ruler').style.width = (labelWidth + duration * pxPerSec) + 'px';
+      const ticks = [];
+      for (let t = 0; t <= duration; t += 5) {
+        ticks.push(`<div class="tick" style="left:${labelWidth + t * pxPerSec}px">${formatTime(t)}</div>`);
+      }
+      $('ruler').innerHTML = ticks.join('');
+
+      const trackCount = Math.max(3, ...project.clips.map(c => c.trackIndex + 1));
+      const assets = assetById();
+      const rows = [];
+      for (let i = 0; i < trackCount; i++) {
+        const clips = project.clips.filter(c => c.trackIndex === i).map(clip => {
+          const asset = assets.get(clip.assetId) || { name: 'missing', kind: 'audio' };
+          return `
+            <div class="clip" data-kind="${asset.kind}" data-id="${clip.id}" style="left:${labelWidth + clip.timelineStart * pxPerSec}px;width:${Math.max(22, clip.duration * pxPerSec)}px">
+              <div class="handle left" data-action="trim-left"></div>
+              <b>${escapeHtml(asset.name)}</b>
+              <span>${formatTime(clip.timelineStart)} / ${clip.duration.toFixed(1)}s</span>
+              <div class="handle right" data-action="trim-right"></div>
+            </div>
+          `;
+        }).join('');
+        rows.push(`<div class="track"><div class="track-label">轨道 ${i + 1}</div>${clips}</div>`);
+      }
+      $('tracks').style.width = (labelWidth + duration * pxPerSec) + 'px';
+      $('tracks').innerHTML = rows.join('');
+      bindDrag();
+    }
+
+    function bindDrag() {
+      document.querySelectorAll('.clip').forEach(el => {
+        el.onpointerdown = event => {
+          const id = el.dataset.id;
+          const clip = project.clips.find(c => c.id === id);
+          if (!clip) return;
+          const action = event.target.dataset.action || 'move';
+          const startX = event.clientX;
+          const original = { ...clip };
+          el.setPointerCapture(event.pointerId);
+          el.onpointermove = moveEvent => {
+            const delta = (moveEvent.clientX - startX) / pxPerSec;
+            if (action === 'trim-left') {
+              const newSource = Math.max(0, original.sourceStart + delta);
+              const newStart = Math.max(0, original.timelineStart + delta);
+              const newDuration = Math.max(0.1, original.duration - (newStart - original.timelineStart));
+              Object.assign(clip, { sourceStart: newSource, timelineStart: newStart, duration: newDuration });
+            } else if (action === 'trim-right') {
+              clip.duration = Math.max(0.1, original.duration + delta);
+            } else {
+              clip.timelineStart = Math.max(0, original.timelineStart + delta);
+            }
+            renderTimeline();
+          };
+          el.onpointerup = () => {
+            el.onpointermove = null;
+            el.onpointerup = null;
+            setDirty(true);
+            render();
+          };
+        };
+      });
+    }
+
+    function formatTime(sec) {
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    }
+
+    function escapeHtml(text) {
+      return String(text).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[ch]));
+    }
+
+    loadProject().catch(err => setStatus('加载失败: ' + err.message));
+  </script>
+</body>
+</html>
