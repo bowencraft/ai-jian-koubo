@@ -34,7 +34,8 @@ if [ ! -f "$PROJECT_DIR/project.json" ]; then
   "version": 1,
   "name": "multitrack_project",
   "assets": [],
-  "clips": []
+  "clips": [],
+  "timeline": { "trackCount": 4 }
 }
 JSON
 fi

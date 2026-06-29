@@ -67,7 +67,8 @@
 - Modify: `SKILL.md`
 - Modify: `README.md`
 
-- [x] Package `project.json`, `editor.html`, and timeline helpers.
+- [x] Package `project.json`, `editor.html/css/js`, copied `media/`, and timeline helpers.
+- [x] Add a `data.json.timeline` snapshot without removing the legacy review fields.
 - [x] Update the workflow docs from “AI upload source -> AI cut -> human review” to “human assemble -> mixed ASR/AI cut -> human review”.
 - [x] Document legacy migration.
 

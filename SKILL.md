@@ -20,7 +20,7 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 ├── project.json  多轨项目（assets[] + clips[]；旧单素材项目会自动迁移生成）
 ├── 1_转录/   audio.mp3/review_mix.mp3 · volcengine_v3_result.json · subtitles_words.json
 ├── 2_分析/   analysis.txt · sentence_map.json · speech_errors.json · auto_selected.json
-└── 3_审核/   editor.html · review.html · project.json · audio.mp3 · data.json · silence_periods.json
+└── 3_审核/   editor.html/css/js · review.html/css/js · project.json · media/ · audio.mp3 · data.json · silence_periods.json
                 <视频名>_cut.fcpxml   ← 网页点击「导出 FCPXML」后生成在此目录
                                        拖入剪映 / Final Cut Pro 完成最终剪辑
 ```
@@ -45,7 +45,7 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 模式 A（剪口播）:
   0A. 素材编辑页：用 serve_project.sh 在转文字前打开页面 1，管理 assets[] + clips[]
       布局：左上素材库、右上预览、时间线上方片段属性、下方多轨时间线
-      操作：弹窗新增素材；从素材库拖到轨道新增片段；可拖动、对齐、修剪、增删素材
+      操作：上传素材到当前项目；从素材库拖到轨道新增片段；可拖动、对齐、修剪、增删素材/轨道；可导入/导出项目 JSON
       预览规则：视频只预览当前时间最顶部有视频的轨道；音频轨道全部同步播放
       旧单素材项目：启动审核服务时自动迁移成 1 asset + 1 clip，可回编辑页继续改
   1-4. 单素材用 run_transcribe.sh；多轨用 run_multitrack_transcribe.sh 先渲染 review_mix.mp3 再转录（自动）

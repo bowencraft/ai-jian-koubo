@@ -27,6 +27,11 @@ function normalizeProject(project) {
       hasVideo: asset.hasVideo != null ? !!asset.hasVideo : kind !== 'audio',
       duration: numeric(asset.duration, 0),
     };
+    if (Array.isArray(asset.waveform)) {
+      normalized.waveform = asset.waveform
+        .map(value => Math.max(0, Math.min(1, numeric(value, 0))))
+        .slice(0, 80);
+    }
     assetById.set(id, normalized);
     return normalized;
   });
@@ -52,12 +57,24 @@ function normalizeProject(project) {
     .filter(Boolean)
     .sort((a, b) => a.timelineStart - b.timelineStart || a.trackIndex - b.trackIndex);
 
-  return {
+  const trackCount = Math.max(
+    4,
+    Math.floor(numeric(p.timeline && p.timeline.trackCount, 4)),
+    normalizedClips.reduce((max, clip) => Math.max(max, clip.trackIndex + 1), 0)
+  );
+
+  const normalizedProject = {
     version: p.version || 1,
     name: p.name || 'multitrack_project',
     assets: normalizedAssets,
     clips: normalizedClips,
+    timeline: {
+      ...(p.timeline && typeof p.timeline === 'object' ? p.timeline : {}),
+      trackCount,
+    },
   };
+  if (p.transcript && typeof p.transcript === 'object') normalizedProject.transcript = p.transcript;
+  return normalizedProject;
 }
 
 function createLegacyProject({ videoFile, duration }) {

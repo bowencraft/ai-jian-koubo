@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { normalizeProject } = require('./lib/timeline_project');
 
 const subtitlesFile = process.argv[2];
 const autoSelectedFile = process.argv[3];
@@ -22,6 +23,56 @@ if (!subtitlesFile || !autoSelectedFile || !audioFile) {
 
 // 确保输出目录存在（recursive: true 本身幂等，无需 existsSync）
 fs.mkdirSync(outDir, { recursive: true });
+
+function toPosixPath(filePath) {
+  return String(filePath || '').split(path.sep).join('/');
+}
+
+function copyDirSync(srcDir, dstDir) {
+  if (!fs.existsSync(srcDir)) return;
+  fs.mkdirSync(dstDir, { recursive: true });
+  fs.readdirSync(srcDir, { withFileTypes: true }).forEach((entry) => {
+    const src = path.join(srcDir, entry.name);
+    const dst = path.join(dstDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirSync(src, dst);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(src, dst);
+    }
+  });
+}
+
+function buildTimelineSnapshot(rawProject, projectDir) {
+  const normalized = normalizeProject(rawProject);
+  return {
+    version: 1,
+    name: normalized.name,
+    savedAt: new Date().toISOString(),
+    trackCount: normalized.timeline.trackCount,
+    assets: normalized.assets.map(asset => ({
+      id: asset.id,
+      name: asset.name,
+      path: path.isAbsolute(asset.path)
+        ? toPosixPath(path.relative(projectDir, asset.path))
+        : toPosixPath(asset.path),
+      kind: asset.kind,
+      hasAudio: asset.hasAudio,
+      hasVideo: asset.hasVideo,
+      duration: asset.duration,
+    })),
+    clips: normalized.clips.map(clip => ({
+      id: clip.id,
+      assetId: clip.assetId,
+      timelineStart: clip.timelineStart,
+      sourceStart: clip.sourceStart,
+      duration: clip.duration,
+      trackIndex: clip.trackIndex,
+      lane: clip.lane,
+      audioRole: clip.audioRole,
+      enabled: clip.enabled,
+    })),
+  };
+}
 
 if (!fs.existsSync(subtitlesFile)) {
   console.error('❌ 找不到字幕文件:', subtitlesFile);
@@ -59,9 +110,16 @@ if (!fs.existsSync(projectFile) && fs.existsSync(parentProjectFile)) {
   fs.copyFileSync(parentProjectFile, projectFile);
   console.log('已复制多轨项目: project.json');
 }
+const parentMediaDir = path.join(path.dirname(outDir), 'media');
+const reviewMediaDir = path.join(outDir, 'media');
+if (fs.existsSync(parentMediaDir)) {
+  copyDirSync(parentMediaDir, reviewMediaDir);
+  console.log('已复制多轨素材目录: media/');
+}
 if (fs.existsSync(projectFile)) {
   try {
     data.project = JSON.parse(fs.readFileSync(projectFile, 'utf8'));
+    data.timeline = buildTimelineSnapshot(data.project, outDir);
   } catch (e) {
     console.warn('⚠️  project.json 格式错误，审核页将不显示多轨项目: ' + e.message);
   }

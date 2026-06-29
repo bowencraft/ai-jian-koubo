@@ -4,22 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>素材编辑 / Multitrack</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <link rel="stylesheet" href="./editor.css">
 </head>
 <body>
   <div class="topbar">
     <div class="brand">剪<em>播客</em></div>
-    <div class="transport">
-      <button id="jumpStartBtn" title="回到开头">⏮</button>
-      <button class="play-btn" id="playBtn">▶ 播放</button>
-      <button id="stopBtn" title="停止">■</button>
+    <div class="transport" aria-label="播放控制">
+      <button class="icon-btn" id="jumpStartBtn" title="回到时间线开头" aria-label="回到时间线开头"><i class="fa-solid fa-backward-step"></i></button>
+      <button class="icon-btn play-btn" id="playBtn" title="播放或暂停预览" aria-label="播放或暂停预览"><i class="fa-solid fa-play"></i></button>
+      <button class="icon-btn" id="stopBtn" title="停止并回到开头" aria-label="停止并回到开头"><i class="fa-solid fa-stop"></i></button>
       <span class="time-display"><span id="timeCur">00:00</span><span>/</span><span id="timeTot">00:00</span></span>
     </div>
     <div class="actions">
       <div class="status" id="status">加载中...</div>
-      <button id="reviewBtn">回到审核</button>
-      <button class="warn" id="staleBtn">标记需重转文字</button>
-      <button class="primary" id="saveBtn">保存项目</button>
+      <button class="icon-btn" id="importProjectBtn" title="导入项目 JSON" aria-label="导入项目 JSON"><i class="fa-solid fa-file-import"></i></button>
+      <button class="icon-btn" id="exportProjectBtn" title="导出项目 JSON" aria-label="导出项目 JSON"><i class="fa-solid fa-file-export"></i></button>
+      <button class="icon-btn" id="reviewBtn" title="回到审核页" aria-label="回到审核页"><i class="fa-solid fa-clipboard-check"></i></button>
+      <button class="icon-btn warn" id="staleBtn" title="标记需要重新转文字和智能裁切" aria-label="标记需要重新转文字和智能裁切"><i class="fa-solid fa-rotate"></i></button>
+      <button class="icon-btn primary" id="saveBtn" title="保存当前项目" aria-label="保存当前项目"><i class="fa-solid fa-floppy-disk"></i></button>
+      <input id="projectImportInput" type="file" accept="application/json,.json" hidden>
     </div>
   </div>
 
@@ -31,8 +35,8 @@
           <h2>素材库</h2>
         </div>
         <div class="head-actions">
-          <button id="uploadAssetBtn" title="上传到当前项目媒体目录">上传</button>
-          <button class="primary" id="openAssetModalBtn">导入路径</button>
+          <button class="icon-btn primary" id="uploadAssetBtn" title="上传音频或视频到当前项目" aria-label="上传音频或视频到当前项目"><i class="fa-solid fa-upload"></i></button>
+          <button class="icon-btn" id="removeSelectedAssetBtn" title="删除选中的素材及其片段" aria-label="删除选中的素材及其片段"><i class="fa-solid fa-trash"></i></button>
           <input id="uploadInput" type="file" accept="audio/*,video/*" multiple hidden>
         </div>
       </div>
@@ -43,9 +47,9 @@
       <div class="panel-head">
         <div>
           <span class="kicker">/ PROGRAM</span>
-          <h2>预览</h2>
+          <h2>节目监视器</h2>
         </div>
-        <span class="preview-rule">视频取当前最上方视频轨 · 音频轨全部播放</span>
+        <span class="preview-rule">最高视频轨显示画面 · 所有音频轨同步播放</span>
       </div>
       <div class="viewer">
         <video id="previewVideo" playsinline></video>
@@ -57,80 +61,53 @@
     <div class="panel-resizer col-resizer" id="colResizer" title="拖动调整素材库宽度"></div>
     <div class="panel-resizer row-resizer" id="rowResizer" title="拖动调整上方面板高度"></div>
 
-    <section class="inspector-panel">
-      <div class="panel-head compact">
-        <div>
-          <span class="kicker">/ INSPECTOR</span>
-          <h2>片段属性</h2>
-        </div>
-        <button id="deleteClipBtn">删除片段</button>
-      </div>
-      <div class="notice" id="staleNotice">项目已修改。回到审核页后，可以选择重新转文字和智能裁切，或继续沿用当前审核选择。</div>
-      <div class="inspector-grid" id="inspector">
-        <div class="empty-hint">在时间线上选择一个片段进行精调</div>
-      </div>
-    </section>
-
     <section class="timeline-panel">
-      <div class="timeline-toolbar">
-        <div class="timeline-title">
-          <span class="kicker">/ TIMELINE</span>
-          <button class="tool active" id="selectToolBtn" title="选择工具">↖</button>
-          <button class="tool" id="razorToolBtn" title="切割工具（占位）">⌇</button>
-          <button class="tool" id="snapBtn" title="吸附开关">磁吸</button>
+      <aside class="inspector-panel">
+        <div class="panel-head compact">
+          <div>
+            <span class="kicker">/ INSPECTOR</span>
+            <h2>片段属性</h2>
+          </div>
+          <button class="icon-btn danger" id="deleteClipBtn" title="删除选中的片段" aria-label="删除选中的片段"><i class="fa-solid fa-trash-can"></i></button>
         </div>
-        <div class="zoom-group">
-          <button id="zoomOutBtn">−</button>
-          <input id="zoomSlider" type="range" min="1" max="90" value="34">
-          <button id="zoomInBtn">+</button>
-          <button id="fitTimelineBtn">适配</button>
+        <div class="notice" id="staleNotice">项目已修改。回到审核页后，可选择重新转文字和智能裁切，或继续沿用当前审核选择。</div>
+        <div class="inspector-grid" id="inspector">
+          <div class="empty-hint">在时间线上选择一个片段进行精调</div>
         </div>
-      </div>
-      <div class="timeline-body">
-        <div class="track-tools">
-          <button class="tool active" title="轨道选择">V</button>
-          <button class="tool" title="音频轨">A</button>
-          <button class="tool" title="锁定占位">🔒</button>
+      </aside>
+
+      <div class="timeline-workspace">
+        <div class="timeline-toolbar">
+          <div class="timeline-title">
+            <span class="kicker">/ TIMELINE</span>
+            <button class="tool active" id="selectToolBtn" title="选择工具：移动和修剪片段" aria-label="选择工具"><i class="fa-solid fa-arrow-pointer"></i></button>
+            <button class="tool" id="razorToolBtn" title="切割工具：在播放头处分割片段" aria-label="切割工具"><i class="fa-solid fa-scissors"></i></button>
+            <button class="tool active" id="snapBtn" title="切换时间吸附" aria-label="切换时间吸附"><i class="fa-solid fa-magnet"></i></button>
+            <button class="tool" id="addTrackBtn" title="新增一条轨道" aria-label="新增一条轨道"><i class="fa-solid fa-plus"></i></button>
+            <button class="tool" id="deleteTrackBtn" title="删除最后一条空轨道" aria-label="删除最后一条空轨道"><i class="fa-solid fa-minus"></i></button>
+          </div>
+          <div class="zoom-group">
+            <button class="icon-btn" id="zoomOutBtn" title="缩小时间线" aria-label="缩小时间线"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
+            <input id="zoomSlider" type="range" min="1" max="90" value="34" aria-label="时间线缩放">
+            <button class="icon-btn" id="zoomInBtn" title="放大时间线" aria-label="放大时间线"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
+            <button class="icon-btn" id="fitTimelineBtn" title="适配整段时间线" aria-label="适配整段时间线"><i class="fa-solid fa-expand"></i></button>
+          </div>
         </div>
-        <div class="timeline-scroll" id="timelineScroll">
-          <div class="ruler" id="ruler"></div>
-          <div class="tracks" id="tracks"></div>
-          <div class="playhead" id="playhead"></div>
+        <div class="timeline-body">
+          <div class="track-tools">
+            <button class="tool active" title="显示视频轨" aria-label="显示视频轨"><i class="fa-solid fa-video"></i></button>
+            <button class="tool active" title="显示音频轨" aria-label="显示音频轨"><i class="fa-solid fa-volume-high"></i></button>
+            <button class="tool" title="轨道锁定占位" aria-label="轨道锁定占位"><i class="fa-solid fa-lock"></i></button>
+          </div>
+          <div class="timeline-scroll" id="timelineScroll">
+            <div class="ruler" id="ruler"></div>
+            <div class="tracks" id="tracks"></div>
+            <div class="playhead" id="playhead"></div>
+          </div>
         </div>
       </div>
     </section>
   </main>
-
-  <dialog id="assetModal">
-    <form method="dialog" class="modal-card">
-      <div class="panel-head">
-        <div>
-          <span class="kicker">/ IMPORT PATH</span>
-          <h2>通过路径导入素材</h2>
-        </div>
-        <button value="cancel">关闭</button>
-      </div>
-      <label for="assetPath">本机素材绝对路径</label>
-      <input id="assetPath" placeholder="/Users/.../host.m4a">
-      <div class="two-col">
-        <div>
-          <label for="assetName">名称</label>
-          <input id="assetName" placeholder="Host Mic">
-        </div>
-        <div>
-          <label for="assetKind">类型</label>
-          <select id="assetKind">
-            <option value="audio">音频</option>
-            <option value="video">视频</option>
-          </select>
-        </div>
-      </div>
-      <div class="modal-actions">
-        <button value="cancel">取消</button>
-        <button class="primary" id="addAssetBtn" value="default">添加</button>
-      </div>
-    </form>
-  </dialog>
 
   <script src="./editor.js"></script>
 </body>

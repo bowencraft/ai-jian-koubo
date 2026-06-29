@@ -67,7 +67,7 @@ let words = [];
         peaksData = (pk && Array.isArray(pk.peaks)) ? pk : null;
         silencePeriods = Array.isArray(sp) ? sp.slice().sort((a, b) => a.start - b.start) : [];
         currentProjectSignature = draftResp && draftResp.projectSignature ? draftResp.projectSignature : null;
-        renderProjectSummary(projectResp && projectResp.project);
+        renderProjectSummary((projectResp && projectResp.project) || data.project || data.timeline);
         const restored = applyDraft(draftResp && draftResp.draft);
 
         initWave();
@@ -91,9 +91,14 @@ let words = [];
     function renderProjectSummary(project) {
       const el = document.getElementById('projectSummary');
       if (!el || !project || !Array.isArray(project.assets) || !Array.isArray(project.clips)) return;
-      const trackCount = project.clips.reduce((max, clip) => Math.max(max, Number(clip.trackIndex || clip.lane || 0) + 1), 0);
+      const declaredTracks = Number((project.timeline && project.timeline.trackCount) || project.trackCount || 0);
+      const trackCount = Math.max(
+        declaredTracks,
+        project.clips.reduce((max, clip) => Math.max(max, Number(clip.trackIndex || clip.lane || 0) + 1), 0),
+        1
+      );
       el.textContent = `多轨 ${project.assets.length} 素材 / ${trackCount || 1} 轨`;
-      renderProjectTracks(project, trackCount || 1);
+      renderProjectTracks(project, trackCount);
     }
 
     function renderProjectTracks(project, trackCount) {

@@ -1,22 +1,29 @@
-let project = { version: 1, name: 'multitrack_project', assets: [], clips: [] };
+let project = { version: 1, name: 'multitrack_project', assets: [], clips: [], timeline: { trackCount: 4 } };
 let reviewDuration = 0;
 let dirty = false;
 let selectedClipId = null;
+let selectedAssetId = null;
 let playheadTime = 0;
 let pxPerSec = 34;
 let isPlaying = false;
 let rafId = null;
 let lastTick = 0;
 let snapEnabled = true;
+let currentTool = 'select';
+let pendingMetadataProbe = null;
 
 const labelWidth = 92;
+const trackHeight = 68;
 const hiddenPlayers = new Map();
 const $ = id => document.getElementById(id);
 const uid = prefix => prefix + '-' + Math.random().toString(16).slice(2, 10);
 const num = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const assetById = () => new Map(project.assets.map(asset => [asset.id, asset]));
 
-function setStatus(text) { $('status').textContent = text; }
+function setStatus(text) {
+  $('status').textContent = text;
+}
 
 function setDirty(value) {
   dirty = value;
@@ -24,7 +31,44 @@ function setDirty(value) {
   setStatus(dirty ? '有未保存修改' : '已保存');
 }
 
+function ensureTimeline() {
+  project = project && typeof project === 'object' ? project : {};
+  project.assets = Array.isArray(project.assets) ? project.assets : [];
+  project.clips = Array.isArray(project.clips) ? project.clips : [];
+  project.timeline = project.timeline && typeof project.timeline === 'object' ? project.timeline : {};
+  const needed = project.clips.reduce((max, clip) => Math.max(max, Math.floor(num(clip.trackIndex, num(clip.lane, 0))) + 1), 0);
+  const requested = Math.floor(num(project.timeline.trackCount, 4));
+  project.timeline.trackCount = Math.max(4, requested, needed);
+  project.version = project.version || 1;
+  project.name = project.name || 'multitrack_project';
+}
+
+function normalizeClientProject(nextProject) {
+  project = nextProject && typeof nextProject === 'object' ? nextProject : project;
+  ensureTimeline();
+  const assets = assetById();
+  project.clips = project.clips
+    .filter(clip => assets.has(String(clip.assetId)))
+    .map((clip, index) => {
+      const trackIndex = Math.max(0, Math.floor(num(clip.trackIndex, num(clip.lane, 0))));
+      return {
+        id: String(clip.id || uid('clip')),
+        assetId: String(clip.assetId),
+        timelineStart: Math.max(0, num(clip.timelineStart, num(clip.offset, 0))),
+        sourceStart: Math.max(0, num(clip.sourceStart, num(clip.start, 0))),
+        duration: Math.max(0.1, num(clip.duration, Math.max(0.1, num(clip.end, 0) - num(clip.start, 0)))),
+        trackIndex,
+        lane: trackIndex,
+        audioRole: clip.audioRole || 'dialogue',
+        enabled: clip.enabled !== false,
+        name: clip.name || `片段 ${index + 1}`,
+      };
+    });
+  ensureTimeline();
+}
+
 function projectDuration() {
+  ensureTimeline();
   return Math.max(20, reviewDuration, ...project.clips.map(c => num(c.timelineStart) + num(c.duration)));
 }
 
@@ -36,14 +80,17 @@ async function loadProject() {
   const res = await fetch('/api/project');
   const data = await res.json();
   if (!data.success) throw new Error(data.error || '读取项目失败');
-  project = data.project;
+  normalizeClientProject(data.project);
   reviewDuration = data.reviewDuration || 0;
   fitTimeline(false);
   render();
   setDirty(false);
+  pendingMetadataProbe = probeProjectMedia();
+  pendingMetadataProbe.catch(err => setStatus('素材读取失败: ' + err.message));
 }
 
 async function saveProject() {
+  ensureTimeline();
   const res = await fetch('/api/project', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -52,11 +99,12 @@ async function saveProject() {
   const data = await res.json();
   if (!data.success) {
     setStatus('保存失败: ' + data.error);
-    return;
+    return false;
   }
-  project = data.project;
+  normalizeClientProject(data.project);
   render();
   setDirty(false);
+  return true;
 }
 
 function markNeedsTranscript() {
@@ -66,27 +114,6 @@ function markNeedsTranscript() {
     markedAt: new Date().toISOString()
   };
   setDirty(true);
-}
-
-function addAssetFromModal() {
-  const filePath = $('assetPath').value.trim();
-  if (!filePath) return;
-  const name = $('assetName').value.trim() || filePath.split('/').pop().replace(/\.[^.]+$/, '');
-  const kind = $('assetKind').value;
-  project.assets.push({
-    id: uid('asset'),
-    name,
-    path: filePath,
-    kind,
-    hasAudio: true,
-    hasVideo: kind === 'video',
-    duration: 0
-  });
-  $('assetPath').value = '';
-  $('assetName').value = '';
-  $('assetModal').close();
-  setDirty(true);
-  render();
 }
 
 function inferKindFromFile(file) {
@@ -106,57 +133,79 @@ async function uploadFiles(files) {
     });
     const data = await res.json();
     if (!data.success) throw new Error(data.error || `上传失败: ${file.name}`);
-    if (data.project) project = data.project;
-    else project.assets.push(data.asset);
+    if (data.project) normalizeClientProject(data.project);
+    if (data.asset && data.asset.id) selectedAssetId = data.asset.id;
   }
-  setDirty(true);
   render();
+  setStatus('正在读取素材时长和波形...');
+  await probeProjectMedia();
+  setDirty(false);
+}
+
+function selectAsset(id) {
+  selectedAssetId = id;
+  renderAssets();
 }
 
 function removeAsset(id) {
   project.assets = project.assets.filter(asset => asset.id !== id);
   project.clips = project.clips.filter(clip => clip.assetId !== id);
   if (selectedClipId && !project.clips.some(clip => clip.id === selectedClipId)) selectedClipId = null;
+  if (selectedAssetId === id) selectedAssetId = null;
   stopPreview();
   setDirty(true);
   render();
 }
 
+function removeSelectedAsset() {
+  if (!selectedAssetId) {
+    setStatus('先在素材库选择一个素材');
+    return;
+  }
+  removeAsset(selectedAssetId);
+}
+
 function addClipFromAsset(assetId, trackIndex, timelineStart) {
+  ensureTimeline();
   const asset = project.assets.find(a => a.id === assetId);
   if (!asset) return;
-  const duration = Math.max(2, Math.min(30, num(asset.duration, 10) || 10));
+  const duration = Math.max(1, num(asset.duration, 10) || 10);
+  const safeTrack = clamp(Math.floor(num(trackIndex, 0)), 0, project.timeline.trackCount - 1);
   const clip = {
     id: uid('clip'),
     assetId,
     timelineStart: Math.max(0, snapTime(timelineStart)),
     sourceStart: 0,
     duration,
-    trackIndex,
-    lane: trackIndex,
-    audioRole: asset.kind === 'audio' ? 'dialogue' : 'video',
+    trackIndex: safeTrack,
+    lane: safeTrack,
+    audioRole: asset.kind === 'audio' || asset.hasVideo === false ? 'dialogue' : 'video',
     enabled: true
   };
   project.clips.push(clip);
   selectedClipId = clip.id;
+  selectedAssetId = assetId;
   setDirty(true);
   render();
 }
 
-function updateClip(id, patch) {
+function updateClip(id, patch, shouldRender = true) {
+  ensureTimeline();
   project.clips = project.clips.map(clip => {
     if (clip.id !== id) return clip;
     const next = { ...clip, ...patch };
     next.timelineStart = Math.max(0, snapTime(num(next.timelineStart)));
     next.sourceStart = Math.max(0, num(next.sourceStart));
     next.duration = Math.max(0.1, num(next.duration, 0.1));
-    next.trackIndex = Math.max(0, Math.floor(num(next.trackIndex)));
+    next.trackIndex = clamp(Math.floor(num(next.trackIndex)), 0, project.timeline.trackCount - 1);
     next.lane = next.trackIndex;
     return next;
   });
   setDirty(true);
-  render();
-  syncPreview();
+  if (shouldRender) {
+    render();
+    syncPreview();
+  }
 }
 
 function deleteSelectedClip() {
@@ -168,7 +217,69 @@ function deleteSelectedClip() {
   syncPreview();
 }
 
+function addTrack() {
+  ensureTimeline();
+  project.timeline.trackCount += 1;
+  setDirty(true);
+  renderTimeline();
+}
+
+function deleteTrack(trackIndex = project.timeline.trackCount - 1) {
+  ensureTimeline();
+  const index = Math.floor(num(trackIndex, project.timeline.trackCount - 1));
+  if (project.timeline.trackCount <= 1) return;
+  if (project.clips.some(clip => clip.trackIndex === index)) {
+    setStatus('该轨道还有片段，先移动或删除片段');
+    return;
+  }
+  project.clips.forEach(clip => {
+    if (clip.trackIndex > index) {
+      clip.trackIndex -= 1;
+      clip.lane = clip.trackIndex;
+    }
+  });
+  project.timeline.trackCount -= 1;
+  setDirty(true);
+  renderTimeline();
+}
+
+function splitClipAt(clipId, time) {
+  const clip = project.clips.find(c => c.id === clipId);
+  if (!clip) return false;
+  const offset = time - clip.timelineStart;
+  if (offset <= 0.1 || offset >= clip.duration - 0.1) {
+    setStatus('播放头需要位于片段内部');
+    return false;
+  }
+  const right = {
+    ...clip,
+    id: uid('clip'),
+    timelineStart: snapTime(time),
+    sourceStart: clip.sourceStart + offset,
+    duration: clip.duration - offset,
+  };
+  clip.duration = offset;
+  project.clips.push(right);
+  selectedClipId = right.id;
+  setDirty(true);
+  render();
+  syncPreview();
+  return true;
+}
+
+function splitAtPlayhead() {
+  const target = selectedClipId
+    ? project.clips.find(c => c.id === selectedClipId && playheadTime > c.timelineStart && playheadTime < c.timelineStart + c.duration)
+    : activeClipsAt(playheadTime)[0];
+  if (!target) {
+    setStatus('播放头下没有可切割片段');
+    return;
+  }
+  splitClipAt(target.id, playheadTime);
+}
+
 function render() {
+  ensureTimeline();
   renderAssets();
   renderInspector();
   renderTimeline();
@@ -176,37 +287,113 @@ function render() {
 }
 
 function renderAssets() {
-  $('assetList').innerHTML = project.assets.map(asset => `
-    <div class="asset-card" draggable="true" data-asset-id="${asset.id}" title="拖到下方时间线添加片段">
-      <div class="asset-title">
-        <span>${escapeHtml(asset.name)}</span>
-        <span class="asset-kind">${asset.kind || 'audio'}</span>
+  $('removeSelectedAssetBtn').disabled = !selectedAssetId;
+  $('assetList').innerHTML = project.assets.map(asset => {
+    const isVideo = asset.kind === 'video' || asset.hasVideo;
+    const durationText = asset.duration ? formatTime(asset.duration) : '读取中';
+    return `
+      <div class="asset-card ${asset.id === selectedAssetId ? 'selected' : ''}" draggable="true" data-asset-id="${asset.id}" title="拖到下方时间线添加片段">
+        <div class="asset-title">
+          <span><i class="fa-solid ${isVideo ? 'fa-film' : 'fa-wave-square'}"></i> ${escapeHtml(asset.name)}</span>
+          <span class="asset-kind">${isVideo ? 'video' : 'audio'}</span>
+        </div>
+        <small class="asset-path">${escapeHtml(asset.path || '')}</small>
+        <div class="asset-meta">
+          <span>${durationText}</span>
+          <span>${asset.hasAudio === false ? '无音频' : '含音频'}</span>
+        </div>
+        <div class="asset-actions">
+          <button class="icon-btn mini primary" data-action="insert-asset" data-asset-id="${asset.id}" title="在播放头位置新增片段" aria-label="新增片段"><i class="fa-solid fa-plus"></i></button>
+          <button class="icon-btn mini danger" data-action="remove-asset" data-asset-id="${asset.id}" title="删除素材及其所有片段" aria-label="删除素材"><i class="fa-solid fa-trash-can"></i></button>
+        </div>
       </div>
-      <small class="asset-path">${escapeHtml(asset.path)}</small>
-      <div style="margin-top:8px;display:flex;gap:6px">
-        <button data-action="insert-asset" data-asset-id="${asset.id}">放入时间线</button>
-        <button data-action="remove-asset" data-asset-id="${asset.id}">删除</button>
-      </div>
-    </div>
-  `).join('') || '<div class="asset-card"><small class="asset-path">点击“添加素材”开始</small></div>';
+    `;
+  }).join('') || '<div class="asset-card empty"><small class="asset-path">点击上传按钮添加音频或视频</small></div>';
 
   document.querySelectorAll('.asset-card[draggable="true"]').forEach(card => {
+    card.addEventListener('click', event => {
+      if (card.dataset.suppressClick === '1' || event.target.closest('button')) return;
+      selectAsset(card.dataset.assetId);
+    });
     card.addEventListener('dragstart', event => {
+      selectAsset(card.dataset.assetId);
       event.dataTransfer.setData('text/asset-id', card.dataset.assetId);
       event.dataTransfer.effectAllowed = 'copy';
     });
+    bindAssetPointerDrag(card);
   });
   document.querySelectorAll('[data-action="remove-asset"]').forEach(btn => {
-    btn.addEventListener('click', event => removeAsset(event.currentTarget.dataset.assetId));
+    btn.addEventListener('click', event => {
+      event.stopPropagation();
+      removeAsset(event.currentTarget.dataset.assetId);
+    });
   });
   document.querySelectorAll('[data-action="insert-asset"]').forEach(btn => {
     btn.addEventListener('click', event => {
+      event.stopPropagation();
       const assetId = event.currentTarget.dataset.assetId;
       const asset = project.assets.find(a => a.id === assetId);
-      const defaultTrack = asset && (asset.kind === 'video' || asset.hasVideo) ? 0 : 1;
+      const defaultTrack = asset && (asset.kind === 'video' || asset.hasVideo) ? 0 : Math.min(1, project.timeline.trackCount - 1);
       addClipFromAsset(assetId, defaultTrack, playheadTime);
     });
   });
+}
+
+function bindAssetPointerDrag(card) {
+  card.onpointerdown = event => {
+    if (event.target.closest('button')) return;
+    const assetId = card.dataset.assetId;
+    const start = { x: event.clientX, y: event.clientY };
+    let dragging = false;
+    let ghost = null;
+    let activeTrack = null;
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.querySelectorAll('.track.drag-over').forEach(track => track.classList.remove('drag-over'));
+      if (ghost) ghost.remove();
+    };
+
+    const onMove = moveEvent => {
+      const distance = Math.hypot(moveEvent.clientX - start.x, moveEvent.clientY - start.y);
+      if (!dragging && distance > 6) {
+        dragging = true;
+        selectAsset(assetId);
+        ghost = document.createElement('div');
+        ghost.className = 'asset-drag-ghost';
+        ghost.textContent = project.assets.find(asset => asset.id === assetId)?.name || '素材';
+        document.body.appendChild(ghost);
+      }
+      if (!dragging) return;
+      moveEvent.preventDefault();
+      if (ghost) {
+        ghost.style.left = (moveEvent.clientX + 12) + 'px';
+        ghost.style.top = (moveEvent.clientY + 12) + 'px';
+      }
+      const track = trackElementFromClientY(moveEvent.clientY);
+      if (track !== activeTrack) {
+        if (activeTrack) activeTrack.classList.remove('drag-over');
+        activeTrack = track;
+        if (activeTrack) activeTrack.classList.add('drag-over');
+      }
+    };
+
+    const onUp = upEvent => {
+      if (dragging) {
+        card.dataset.suppressClick = '1';
+        window.setTimeout(() => { delete card.dataset.suppressClick; }, 0);
+        const track = trackElementFromClientY(upEvent.clientY);
+        if (track) {
+          addClipFromAsset(assetId, Number(track.dataset.track), timelineTimeFromClientX(upEvent.clientX));
+        }
+      }
+      cleanup();
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
 }
 
 function renderInspector() {
@@ -221,27 +408,33 @@ function renderInspector() {
   const asset = assets.get(clip.assetId) || { name: 'missing' };
   $('inspector').innerHTML = `
     <div><label>素材</label><input value="${escapeHtml(asset.name)}" disabled></div>
-    <div><label>时间线起点</label><input type="number" step="0.1" value="${clip.timelineStart}" data-field="timelineStart"></div>
-    <div><label>素材入点</label><input type="number" step="0.1" value="${clip.sourceStart}" data-field="sourceStart"></div>
-    <div><label>时长</label><input type="number" step="0.1" value="${clip.duration}" data-field="duration"></div>
-    <div><label>轨道</label><input type="number" step="1" value="${clip.trackIndex}" data-field="trackIndex"></div>
+    <div><label>时间线起点</label><input type="number" step="0.1" min="0" value="${round1(clip.timelineStart)}" data-field="timelineStart"></div>
+    <div><label>素材入点</label><input type="number" step="0.1" min="0" value="${round1(clip.sourceStart)}" data-field="sourceStart"></div>
+    <div><label>时长</label><input type="number" step="0.1" min="0.1" value="${round1(clip.duration)}" data-field="duration"></div>
+    <div><label>轨道</label><input type="number" step="1" min="1" max="${project.timeline.trackCount}" value="${clip.trackIndex + 1}" data-field="trackIndex"></div>
     <div><label>音频角色</label><input value="${escapeHtml(clip.audioRole || 'dialogue')}" data-field="audioRole"></div>
   `;
   $('inspector').querySelectorAll('[data-field]').forEach(input => {
     input.addEventListener('change', event => {
       const field = event.currentTarget.dataset.field;
       const raw = event.currentTarget.value;
-      updateClip(clip.id, { [field]: field === 'audioRole' ? raw : num(raw) });
+      const value = field === 'audioRole' ? raw : num(raw);
+      updateClip(clip.id, { [field]: field === 'trackIndex' ? value - 1 : value });
     });
   });
 }
 
 function renderTimeline() {
+  ensureTimeline();
   const duration = Math.ceil(projectDuration());
-  const width = labelWidth + duration * pxPerSec + 180;
+  const scroll = $('timelineScroll');
+  const minWidth = scroll ? scroll.clientWidth : window.innerWidth;
+  const width = Math.max(minWidth, labelWidth + duration * pxPerSec + 180);
   $('ruler').style.width = width + 'px';
   $('tracks').style.width = width + 'px';
   $('playhead').style.left = (labelWidth + playheadTime * pxPerSec) + 'px';
+  $('playhead').style.height = (32 + project.timeline.trackCount * trackHeight) + 'px';
+  $('tracks').style.height = (project.timeline.trackCount * trackHeight) + 'px';
 
   const ticks = [];
   const tickStep = pxPerSec < 2 ? 120 : pxPerSec < 5 ? 60 : pxPerSec < 12 ? 15 : 5;
@@ -250,26 +443,55 @@ function renderTimeline() {
   }
   $('ruler').innerHTML = ticks.join('');
 
-  const trackCount = Math.max(4, ...project.clips.map(c => c.trackIndex + 1));
   const assets = assetById();
   const rows = [];
-  for (let trackIndex = 0; trackIndex < trackCount; trackIndex++) {
+  for (let trackIndex = 0; trackIndex < project.timeline.trackCount; trackIndex++) {
     const clips = project.clips.filter(c => c.trackIndex === trackIndex).map(clip => {
       const asset = assets.get(clip.assetId) || { name: 'missing', kind: 'audio' };
-      const kind = asset.kind === 'video' || asset.hasVideo ? 'video' : 'audio';
+      const isVideo = asset.kind === 'video' || asset.hasVideo;
       return `
-        <div class="clip ${kind} ${clip.id === selectedClipId ? 'selected' : ''}" data-id="${clip.id}" style="left:${labelWidth + clip.timelineStart * pxPerSec}px;width:${Math.max(24, clip.duration * pxPerSec)}px">
+        <div class="clip ${isVideo ? 'video' : 'audio'} ${clip.id === selectedClipId ? 'selected' : ''}" data-id="${clip.id}" style="left:${labelWidth + clip.timelineStart * pxPerSec}px;width:${Math.max(24, clip.duration * pxPerSec)}px">
           <div class="handle left" data-action="trim-left"></div>
-          <b>${escapeHtml(asset.name)}</b>
-          <span>${formatTime(clip.timelineStart)} · ${clip.duration.toFixed(1)}s</span>
+          <div class="clip-content">
+            <b><i class="fa-solid ${isVideo ? 'fa-film' : 'fa-wave-square'}"></i> ${escapeHtml(asset.name)}</b>
+            <span>${formatTime(clip.timelineStart)} · ${round1(clip.duration)}s</span>
+          </div>
+          ${asset.hasAudio !== false ? renderWaveform(asset) : ''}
           <div class="handle right" data-action="trim-right"></div>
         </div>
       `;
     }).join('');
-    rows.push(`<div class="track" data-track="${trackIndex}"><div class="track-label">轨道 ${trackIndex + 1}</div>${clips}</div>`);
+    rows.push(`
+      <div class="track" data-track="${trackIndex}">
+        <div class="track-label">
+          <div class="track-label-row">
+            <span>轨 ${trackIndex + 1}</span>
+            <button class="icon-btn mini" data-action="delete-track" data-track="${trackIndex}" title="删除这条空轨道" aria-label="删除这条空轨道"><i class="fa-solid fa-minus"></i></button>
+          </div>
+        </div>
+        ${clips}
+      </div>
+    `);
   }
   $('tracks').innerHTML = rows.join('');
   bindTimelineInteractions();
+}
+
+function renderWaveform(asset) {
+  const peaks = Array.isArray(asset.waveform) && asset.waveform.length ? asset.waveform : fallbackWaveform(asset.id);
+  const bars = peaks.slice(0, 48).map(value => {
+    const h = Math.max(2, Math.round(clamp(Number(value) || 0.08, 0.04, 1) * 12));
+    return `<span style="height:${h}px"></span>`;
+  }).join('');
+  return `<div class="clip-waveform">${bars}</div>`;
+}
+
+function fallbackWaveform(seedText) {
+  let seed = String(seedText || 'asset').split('').reduce((sum, ch) => sum + ch.charCodeAt(0), 0);
+  return Array.from({ length: 40 }, () => {
+    seed = (seed * 9301 + 49297) % 233280;
+    return 0.18 + (seed / 233280) * 0.72;
+  });
 }
 
 function bindTimelineInteractions() {
@@ -283,18 +505,20 @@ function bindTimelineInteractions() {
       event.preventDefault();
       track.classList.remove('drag-over');
       const assetId = event.dataTransfer.getData('text/asset-id');
-      const rect = track.getBoundingClientRect();
-      const scrollLeft = $('timelineScroll').scrollLeft;
-      const x = event.clientX - rect.left + scrollLeft - labelWidth;
-      const timelineStart = Math.max(0, snapTime(x / pxPerSec));
+      const timelineStart = timelineTimeFromClientX(event.clientX);
       addClipFromAsset(assetId, Number(track.dataset.track), timelineStart);
     });
   });
 
+  document.querySelectorAll('[data-action="delete-track"]').forEach(btn => {
+    btn.addEventListener('click', event => {
+      event.stopPropagation();
+      deleteTrack(Number(event.currentTarget.dataset.track));
+    });
+  });
+
   $('ruler').onclick = event => {
-    const rect = $('ruler').getBoundingClientRect();
-    const t = Math.max(0, snapTime((event.clientX - rect.left + $('timelineScroll').scrollLeft - labelWidth) / pxPerSec));
-    seekPreview(t);
+    seekPreview(timelineTimeFromClientX(event.clientX));
   };
 
   document.querySelectorAll('.clip').forEach(el => {
@@ -303,16 +527,25 @@ function bindTimelineInteractions() {
       const clip = project.clips.find(c => c.id === id);
       if (!clip) return;
       selectedClipId = id;
+      selectClipElement(id);
       renderInspector();
-      document.querySelectorAll('.clip').forEach(c => c.classList.toggle('selected', c.dataset.id === id));
+      const timeAtPointer = timelineTimeFromClientX(event.clientX);
+      if (currentTool === 'razor') {
+        splitClipAt(id, timeAtPointer);
+        return;
+      }
       const action = event.target.dataset.action || 'move';
       const startX = event.clientX;
       const original = { ...clip };
+      el.classList.add('dragging');
       el.setPointerCapture(event.pointerId);
-      el.onpointermove = moveEvent => {
+      event.preventDefault();
+
+      const onClipMove = moveEvent => {
         const delta = (moveEvent.clientX - startX) / pxPerSec;
         if (action === 'trim-left') {
-          const newStart = Math.max(0, snapTime(original.timelineStart + delta));
+          const maxStart = original.timelineStart + original.duration - 0.1;
+          const newStart = clamp(snapTime(original.timelineStart + delta), 0, maxStart);
           const consumed = newStart - original.timelineStart;
           Object.assign(clip, {
             timelineStart: newStart,
@@ -323,18 +556,58 @@ function bindTimelineInteractions() {
           clip.duration = Math.max(0.1, snapTime(original.duration + delta));
         } else {
           clip.timelineStart = Math.max(0, snapTime(original.timelineStart + delta));
+          const newTrack = trackIndexFromClientY(moveEvent.clientY);
+          if (newTrack != null) {
+            clip.trackIndex = newTrack;
+            clip.lane = newTrack;
+          }
         }
-        renderTimeline();
+        positionClipElement(el, clip);
+        $('playhead').style.left = (labelWidth + playheadTime * pxPerSec) + 'px';
       };
-      el.onpointerup = () => {
-        el.onpointermove = null;
-        el.onpointerup = null;
+      const onClipUp = () => {
+        el.classList.remove('dragging');
+        window.removeEventListener('pointermove', onClipMove);
+        window.removeEventListener('pointerup', onClipUp);
         setDirty(true);
         render();
         syncPreview();
       };
+      window.addEventListener('pointermove', onClipMove);
+      window.addEventListener('pointerup', onClipUp);
     };
   });
+}
+
+function selectClipElement(id) {
+  document.querySelectorAll('.clip').forEach(c => c.classList.toggle('selected', c.dataset.id === id));
+}
+
+function positionClipElement(el, clip) {
+  el.style.left = (labelWidth + clip.timelineStart * pxPerSec) + 'px';
+  el.style.width = Math.max(24, clip.duration * pxPerSec) + 'px';
+  if (Number(el.closest('.track')?.dataset.track) !== clip.trackIndex) {
+    const nextTrack = document.querySelector(`.track[data-track="${clip.trackIndex}"]`);
+    if (nextTrack) nextTrack.appendChild(el);
+  }
+}
+
+function timelineTimeFromClientX(clientX) {
+  const scroll = $('timelineScroll');
+  const rect = scroll.getBoundingClientRect();
+  return Math.max(0, snapTime((clientX - rect.left + scroll.scrollLeft - labelWidth) / pxPerSec));
+}
+
+function trackIndexFromClientY(clientY) {
+  const found = trackElementFromClientY(clientY);
+  return found ? Number(found.dataset.track) : null;
+}
+
+function trackElementFromClientY(clientY) {
+  return Array.from(document.querySelectorAll('.track')).find(track => {
+    const rect = track.getBoundingClientRect();
+    return clientY >= rect.top && clientY <= rect.bottom;
+  }) || null;
 }
 
 function activeClipsAt(time) {
@@ -398,14 +671,14 @@ function syncPreview() {
 function playPreview() {
   isPlaying = true;
   lastTick = performance.now();
-  $('playBtn').textContent = '⏸ 暂停';
+  $('playBtn').innerHTML = '<i class="fa-solid fa-pause"></i>';
   syncPreview();
   rafId = requestAnimationFrame(tickPreview);
 }
 
 function pausePreview() {
   isPlaying = false;
-  $('playBtn').textContent = '▶ 播放';
+  $('playBtn').innerHTML = '<i class="fa-solid fa-play"></i>';
   $('previewVideo').pause();
   hiddenPlayers.forEach(player => player.pause());
   if (rafId) cancelAnimationFrame(rafId);
@@ -454,6 +727,121 @@ function fitTimeline(shouldRender = true) {
   if (shouldRender) renderTimeline();
 }
 
+async function probeProjectMedia() {
+  const assets = [...project.assets];
+  let changed = false;
+  for (const asset of assets) {
+    changed = await probeAssetMetadata(asset) || changed;
+    if (asset.hasAudio !== false && !Array.isArray(asset.waveform)) {
+      const waveform = await computeWaveform(asset);
+      if (waveform.length) {
+        asset.waveform = waveform;
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    render();
+    await saveProject();
+  }
+}
+
+function probeAssetMetadata(asset) {
+  return new Promise(resolve => {
+    if (!asset || !asset.id) {
+      resolve(false);
+      return;
+    }
+    const isVideo = asset.kind === 'video' || asset.hasVideo;
+    const media = document.createElement(isVideo ? 'video' : 'audio');
+    let settled = false;
+    const finish = changed => {
+      if (settled) return;
+      settled = true;
+      media.removeAttribute('src');
+      media.load();
+      resolve(changed);
+    };
+    media.preload = 'metadata';
+    media.muted = true;
+    media.src = mediaUrl(asset.id);
+    media.onloadedmetadata = () => {
+      let changed = false;
+      if (Number.isFinite(media.duration) && media.duration > 0 && Math.abs(num(asset.duration) - media.duration) > 0.05) {
+        asset.duration = +media.duration.toFixed(3);
+        changed = true;
+      }
+      if (isVideo && asset.hasVideo !== true) {
+        asset.hasVideo = true;
+        changed = true;
+      }
+      finish(changed);
+    };
+    media.onerror = () => finish(false);
+    window.setTimeout(() => finish(false), 5000);
+  });
+}
+
+async function computeWaveform(asset) {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return [];
+  try {
+    const res = await fetch(mediaUrl(asset.id));
+    const arrayBuffer = await res.arrayBuffer();
+    const audioContext = new AudioContextClass();
+    const buffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+    const channel = buffer.getChannelData(0);
+    const bucket = Math.max(1, Math.floor(channel.length / 56));
+    const peaks = [];
+    for (let i = 0; i < channel.length; i += bucket) {
+      let max = 0;
+      const end = Math.min(channel.length, i + bucket);
+      for (let j = i; j < end; j++) {
+        const v = Math.abs(channel[j]);
+        if (v > max) max = v;
+      }
+      peaks.push(+max.toFixed(3));
+      if (peaks.length >= 56) break;
+    }
+    if (audioContext.close) audioContext.close();
+    return peaks;
+  } catch (err) {
+    return [];
+  }
+}
+
+function importProjectJson(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      normalizeClientProject(JSON.parse(reader.result));
+      selectedClipId = null;
+      selectedAssetId = null;
+      setDirty(true);
+      render();
+      setStatus('项目已导入，请保存');
+      probeProjectMedia().catch(err => setStatus('素材读取失败: ' + err.message));
+    } catch (err) {
+      setStatus('导入失败: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function exportProjectJson() {
+  ensureTimeline();
+  const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${project.name || 'multitrack_project'}.project.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 function formatTime(sec) {
   const safe = Math.max(0, Number(sec) || 0);
   const m = Math.floor(safe / 60);
@@ -469,6 +857,10 @@ function formatTimecode(sec) {
   return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');
 }
 
+function round1(value) {
+  return Math.round(num(value) * 10) / 10;
+}
+
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, ch => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -476,17 +868,19 @@ function escapeHtml(text) {
 }
 
 function bindChrome() {
-  $('openAssetModalBtn').onclick = () => $('assetModal').showModal();
   $('uploadAssetBtn').onclick = () => $('uploadInput').click();
   $('uploadInput').onchange = event => {
     uploadFiles(event.target.files)
       .then(() => { event.target.value = ''; })
       .catch(err => setStatus(err.message));
   };
-  $('addAssetBtn').onclick = event => {
-    event.preventDefault();
-    addAssetFromModal();
+  $('removeSelectedAssetBtn').onclick = removeSelectedAsset;
+  $('importProjectBtn').onclick = () => $('projectImportInput').click();
+  $('projectImportInput').onchange = event => {
+    importProjectJson(event.target.files && event.target.files[0]);
+    event.target.value = '';
   };
+  $('exportProjectBtn').onclick = exportProjectJson;
   $('saveBtn').onclick = saveProject;
   $('reviewBtn').onclick = () => { location.href = '/'; };
   $('staleBtn').onclick = markNeedsTranscript;
@@ -509,17 +903,49 @@ function bindChrome() {
     renderTimeline();
   };
   $('fitTimelineBtn').onclick = () => fitTimeline(true);
+  $('selectToolBtn').onclick = () => setTool('select');
+  $('razorToolBtn').onclick = () => setTool('razor');
+  $('razorToolBtn').ondblclick = splitAtPlayhead;
+  $('addTrackBtn').onclick = addTrack;
+  $('deleteTrackBtn').onclick = () => deleteTrack(project.timeline.trackCount - 1);
   $('snapBtn').classList.toggle('active', snapEnabled);
   $('snapBtn').onclick = () => {
     snapEnabled = !snapEnabled;
     $('snapBtn').classList.toggle('active', snapEnabled);
   };
+  bindMediaBinDrop();
   bindPanelResizers();
   document.addEventListener('keydown', event => {
     if (event.target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName)) return;
     if (event.code === 'Space') { event.preventDefault(); isPlaying ? pausePreview() : playPreview(); }
+    if (event.key === 'v') setTool('select');
+    if (event.key === 'c') setTool('razor');
+    if (event.key === 'Backspace' || event.key === 'Delete') deleteSelectedClip();
     if (event.key === '+') { pxPerSec = Math.min(90, pxPerSec + 4); $('zoomSlider').value = pxPerSec; renderTimeline(); }
     if (event.key === '-') { pxPerSec = Math.max(1, pxPerSec - 4); $('zoomSlider').value = pxPerSec; renderTimeline(); }
+  });
+}
+
+function setTool(tool) {
+  currentTool = tool;
+  $('selectToolBtn').classList.toggle('active', tool === 'select');
+  $('razorToolBtn').classList.toggle('active', tool === 'razor');
+}
+
+function bindMediaBinDrop() {
+  const bin = document.querySelector('.media-bin');
+  bin.addEventListener('dragover', event => {
+    if (event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length) {
+      event.preventDefault();
+      bin.classList.add('drag-over');
+    }
+  });
+  bin.addEventListener('dragleave', () => bin.classList.remove('drag-over'));
+  bin.addEventListener('drop', event => {
+    if (!event.dataTransfer || !event.dataTransfer.files.length) return;
+    event.preventDefault();
+    bin.classList.remove('drag-over');
+    uploadFiles(event.dataTransfer.files).catch(err => setStatus(err.message));
   });
 }
 
@@ -539,10 +965,10 @@ function bindPanelResizers() {
   window.addEventListener('pointermove', event => {
     if (!drag) return;
     if (drag.type === 'col') {
-      const width = Math.max(260, Math.min(560, drag.start + event.clientX - drag.startX));
+      const width = clamp(drag.start + event.clientX - drag.startX, 260, 560);
       root.style.setProperty('--bin-w', width + 'px');
     } else {
-      const topHeight = Math.max(220, Math.min(window.innerHeight * 0.62, event.clientY - drag.gridTop));
+      const topHeight = clamp(event.clientY - drag.gridTop, 320, window.innerHeight * 0.62);
       root.style.setProperty('--top-h', topHeight + 'px');
     }
   });

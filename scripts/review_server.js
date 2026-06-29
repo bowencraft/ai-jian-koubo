@@ -122,6 +122,15 @@ function inferKind(filePath) {
   return ['.mp4', '.mov', '.m4v', '.webm'].includes(ext) ? 'video' : 'audio';
 }
 
+function toProjectRelative(filePath) {
+  return path.relative(process.cwd(), filePath).split(path.sep).join('/');
+}
+
+function resolveMediaPath(filePath) {
+  if (!filePath) return '';
+  return path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
+}
+
 function streamFile(req, res, filePath, contentType) {
   const stat = fs.statSync(filePath);
   if (req.headers.range) {
@@ -187,13 +196,14 @@ const server = http.createServer((req, res) => {
       timelineProject = readProject();
       const assetId = decodeURIComponent(req.url.replace('/media/', '').split('?')[0]);
       const asset = timelineProject.assets.find(a => a.id === assetId);
-      if (!asset || !asset.path || !fs.existsSync(asset.path)) {
+      const mediaPath = asset ? resolveMediaPath(asset.path) : '';
+      if (!asset || !mediaPath || !fs.existsSync(mediaPath)) {
         res.writeHead(404);
         res.end('Media not found');
         return;
       }
-      const ext = path.extname(asset.path).toLowerCase();
-      streamFile(req, res, asset.path, MIME_TYPES[ext] || 'application/octet-stream');
+      const ext = path.extname(mediaPath).toLowerCase();
+      streamFile(req, res, mediaPath, MIME_TYPES[ext] || 'application/octet-stream');
     } catch (err) {
       res.writeHead(500);
       res.end(err.message);
@@ -243,7 +253,7 @@ const server = http.createServer((req, res) => {
         const asset = {
           id: crypto.randomUUID ? crypto.randomUUID() : `asset-${Date.now()}`,
           name: path.basename(fileName, path.extname(fileName)),
-          path: outputPath,
+          path: toProjectRelative(outputPath),
           kind,
           hasAudio: true,
           hasVideo: kind === 'video',
