@@ -30,7 +30,11 @@
           <span class="kicker">/ ASSETS</span>
           <h2>素材库</h2>
         </div>
-        <button class="primary" id="openAssetModalBtn">添加素材</button>
+        <div class="head-actions">
+          <button id="uploadAssetBtn" title="上传到当前项目媒体目录">上传</button>
+          <button class="primary" id="openAssetModalBtn">导入路径</button>
+          <input id="uploadInput" type="file" accept="audio/*,video/*" multiple hidden>
+        </div>
       </div>
       <div class="asset-list" id="assetList"></div>
     </section>
@@ -46,8 +50,12 @@
       <div class="viewer">
         <video id="previewVideo" playsinline></video>
         <div class="viewer-empty" id="viewerEmpty">当前时间没有视频画面</div>
+        <div class="viewer-timecode" id="viewerTimecode">00:00:00</div>
       </div>
     </section>
+
+    <div class="panel-resizer col-resizer" id="colResizer" title="拖动调整素材库宽度"></div>
+    <div class="panel-resizer row-resizer" id="rowResizer" title="拖动调整上方面板高度"></div>
 
     <section class="inspector-panel">
       <div class="panel-head compact">
@@ -65,17 +73,30 @@
 
     <section class="timeline-panel">
       <div class="timeline-toolbar">
-        <span class="kicker">/ TIMELINE</span>
+        <div class="timeline-title">
+          <span class="kicker">/ TIMELINE</span>
+          <button class="tool active" id="selectToolBtn" title="选择工具">↖</button>
+          <button class="tool" id="razorToolBtn" title="切割工具（占位）">⌇</button>
+          <button class="tool" id="snapBtn" title="吸附开关">磁吸</button>
+        </div>
         <div class="zoom-group">
           <button id="zoomOutBtn">−</button>
-          <input id="zoomSlider" type="range" min="18" max="90" value="34">
+          <input id="zoomSlider" type="range" min="1" max="90" value="34">
           <button id="zoomInBtn">+</button>
+          <button id="fitTimelineBtn">适配</button>
         </div>
       </div>
-      <div class="timeline-scroll" id="timelineScroll">
-        <div class="ruler" id="ruler"></div>
-        <div class="tracks" id="tracks"></div>
-        <div class="playhead" id="playhead"></div>
+      <div class="timeline-body">
+        <div class="track-tools">
+          <button class="tool active" title="轨道选择">V</button>
+          <button class="tool" title="音频轨">A</button>
+          <button class="tool" title="锁定占位">🔒</button>
+        </div>
+        <div class="timeline-scroll" id="timelineScroll">
+          <div class="ruler" id="ruler"></div>
+          <div class="tracks" id="tracks"></div>
+          <div class="playhead" id="playhead"></div>
+        </div>
       </div>
     </section>
   </main>
@@ -84,8 +105,8 @@
     <form method="dialog" class="modal-card">
       <div class="panel-head">
         <div>
-          <span class="kicker">/ IMPORT</span>
-          <h2>新增素材</h2>
+          <span class="kicker">/ IMPORT PATH</span>
+          <h2>通过路径导入素材</h2>
         </div>
         <button value="cancel">关闭</button>
       </div>

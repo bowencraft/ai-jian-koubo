@@ -111,6 +111,17 @@ const MIME_TYPES = {
   '.mov': 'video/quicktime',
 };
 
+function safeFileName(name) {
+  const base = path.basename(String(name || 'media'));
+  const cleaned = base.replace(/[^\w.\- \u4e00-\u9fff]/g, '_').replace(/\s+/g, '_');
+  return cleaned || 'media';
+}
+
+function inferKind(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  return ['.mp4', '.mov', '.m4v', '.webm'].includes(ext) ? 'video' : 'audio';
+}
+
 function streamFile(req, res, filePath, contentType) {
   const stat = fs.statSync(filePath);
   if (req.headers.range) {
@@ -199,6 +210,52 @@ const server = http.createServer((req, res) => {
         timelineProject = writeProject(parsed.project || parsed);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, project: timelineProject }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url.startsWith('/api/upload')) {
+    const parsedUrl = new URL(req.url, `http://localhost:${PORT}`);
+    const originalName = safeFileName(parsedUrl.searchParams.get('name') || 'media');
+    const kind = parsedUrl.searchParams.get('kind') || inferKind(originalName);
+    const mediaDir = path.resolve('media');
+    fs.mkdirSync(mediaDir, { recursive: true });
+    let fileName = originalName;
+    let outputPath = path.join(mediaDir, fileName);
+    const ext = path.extname(originalName);
+    const stem = path.basename(originalName, ext);
+    let n = 1;
+    while (fs.existsSync(outputPath)) {
+      fileName = `${stem}_${n}${ext}`;
+      outputPath = path.join(mediaDir, fileName);
+      n++;
+    }
+
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      try {
+        fs.writeFileSync(outputPath, Buffer.concat(chunks));
+        const asset = {
+          id: crypto.randomUUID ? crypto.randomUUID() : `asset-${Date.now()}`,
+          name: path.basename(fileName, path.extname(fileName)),
+          path: outputPath,
+          kind,
+          hasAudio: true,
+          hasVideo: kind === 'video',
+          duration: 0,
+        };
+        const currentProject = readProject();
+        timelineProject = writeProject({
+          ...currentProject,
+          assets: currentProject.assets.concat(asset),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, asset, project: timelineProject }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: err.message }));
