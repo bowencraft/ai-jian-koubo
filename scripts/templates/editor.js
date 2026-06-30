@@ -14,8 +14,10 @@ let pendingMetadataProbe = null;
 let reviewReady = false;
 
 const labelWidth = 112;
-const trackHeight = 68;
+const trackHeight = 76;
 const minClipDuration = 0.1;
+const waveformPointTarget = 4096;
+const maxZoom = 120;
 const hiddenPlayers = new Map();
 const $ = id => document.getElementById(id);
 const uid = prefix => prefix + '-' + Math.random().toString(16).slice(2, 10);
@@ -640,11 +642,11 @@ function tickStepForZoom() {
 function minZoomForFit() {
   const scroll = $('timelineScroll');
   const available = Math.max(240, (scroll ? scroll.clientWidth : window.innerWidth) - labelWidth - 80);
-  return Math.max(0.05, available / Math.max(1, projectDuration()));
+  return Math.min(maxZoom - 0.01, Math.max(0.05, available / Math.max(1, projectDuration())));
 }
 
 function clampZoom(value) {
-  return clamp(Number(value) || minZoomForFit(), minZoomForFit(), 120);
+  return clamp(Number(value) || minZoomForFit(), minZoomForFit(), maxZoom);
 }
 
 function updateZoomControl() {
@@ -652,7 +654,7 @@ function updateZoomControl() {
   if (!slider) return;
   const min = minZoomForFit();
   slider.min = String(Math.round(min * 100) / 100);
-  slider.max = '120';
+  slider.max = String(maxZoom);
   slider.step = '0.05';
   slider.value = String(Math.round(pxPerSec * 100) / 100);
 }
@@ -672,27 +674,65 @@ const WaveformRenderer = {
     const ctx = canvas.getContext('2d');
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     ctx.clearRect(0, 0, width, height);
-    const mid = height / 2;
-    ctx.strokeStyle = 'rgba(242,235,221,.28)';
+
+    const baseline = height - 1;
+    ctx.strokeStyle = 'rgba(242,235,221,.16)';
     ctx.beginPath();
-    ctx.moveTo(0, mid);
-    ctx.lineTo(width, mid);
+    ctx.moveTo(0, 0.5);
+    ctx.lineTo(width, 0.5);
     ctx.stroke();
-    if (!Array.isArray(peaks) || peaks.length < 2 || !(assetDuration > 0)) return;
+    if (!Array.isArray(peaks) || peaks.length < 2 || !(assetDuration > 0)) {
+      ctx.strokeStyle = 'rgba(24,160,210,.5)';
+      ctx.beginPath();
+      ctx.moveTo(0, baseline);
+      ctx.lineTo(width, baseline);
+      ctx.stroke();
+      return;
+    }
+
     const sourceStart = clamp(num(clip.sourceStart), 0, assetDuration);
     const sourceEnd = clamp(sourceStart + num(clip.duration), sourceStart, assetDuration);
-    const startIndex = Math.floor((sourceStart / assetDuration) * peaks.length);
-    const endIndex = Math.max(startIndex + 1, Math.ceil((sourceEnd / assetDuration) * peaks.length));
-    const slice = peaks.slice(startIndex, endIndex);
-    ctx.fillStyle = 'rgba(242,235,221,.76)';
+    const startIndex = (sourceStart / assetDuration) * peaks.length;
+    const endIndex = Math.max(startIndex + 1, (sourceEnd / assetDuration) * peaks.length);
+    const sourceLength = Math.max(1, endIndex - startIndex);
+    const envelope = new Float32Array(width);
+
     for (let x = 0; x < width; x++) {
-      const i0 = Math.floor((x / width) * slice.length);
-      const i1 = Math.max(i0 + 1, Math.floor(((x + 1) / width) * slice.length));
+      const bucketStart = startIndex + (x / width) * sourceLength;
+      const bucketEnd = startIndex + ((x + 1) / width) * sourceLength;
+      const from = clamp(Math.floor(bucketStart), 0, peaks.length - 1);
+      const to = clamp(Math.ceil(bucketEnd), from + 1, peaks.length);
       let peak = 0;
-      for (let i = i0; i < i1; i++) peak = Math.max(peak, Math.abs(Number(slice[i]) || 0));
-      const bar = Math.max(1, peak * (height - 2));
-      ctx.fillRect(x, mid - bar / 2, 1, bar);
+      if (to - from <= 1) {
+        const left = Math.max(0, Math.min(peaks.length - 1, from));
+        const right = Math.max(0, Math.min(peaks.length - 1, left + 1));
+        const mix = bucketStart - Math.floor(bucketStart);
+        peak = (Math.abs(Number(peaks[left]) || 0) * (1 - mix)) + (Math.abs(Number(peaks[right]) || 0) * mix);
+      } else {
+        for (let i = from; i < to; i++) peak = Math.max(peak, Math.abs(Number(peaks[i]) || 0));
+      }
+      envelope[x] = Math.pow(Math.min(1, peak), 0.72);
     }
+
+    ctx.fillStyle = 'rgba(18,151,204,.94)';
+    ctx.beginPath();
+    ctx.moveTo(0, baseline);
+    for (let x = 0; x < width; x++) {
+      const y = baseline - Math.max(0, envelope[x] * (height - 2));
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(width, baseline);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(80,198,236,.66)';
+    ctx.beginPath();
+    for (let x = 0; x < width; x++) {
+      const y = baseline - Math.max(0, envelope[x] * (height - 2));
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
   }
 };
 
@@ -707,8 +747,33 @@ function drawTimelineWaveforms() {
 }
 
 function bindTimelineInteractions() {
-  $('timelineScroll').onpointerdown = event => {
-    if (!event.target.closest('input, textarea, select')) event.preventDefault();
+  const timelineScroll = $('timelineScroll');
+  timelineScroll.onpointerdown = event => {
+    if (event.button !== 0) return;
+    if (event.target.closest('.clip, .handle, button, input, textarea, select, .track-label')) return;
+
+    event.preventDefault();
+    seekPreview(timelineTimeFromClientX(event.clientX));
+    timelineScroll.classList.add('scrubbing');
+    timelineScroll.setPointerCapture(event.pointerId);
+
+    const onScrubMove = moveEvent => {
+      if ((moveEvent.buttons & 1) !== 1) return;
+      moveEvent.preventDefault();
+      seekPreview(timelineTimeFromClientX(moveEvent.clientX));
+    };
+    const onScrubEnd = endEvent => {
+      timelineScroll.classList.remove('scrubbing');
+      timelineScroll.removeEventListener('pointermove', onScrubMove);
+      timelineScroll.removeEventListener('pointerup', onScrubEnd);
+      timelineScroll.removeEventListener('pointercancel', onScrubEnd);
+      try { timelineScroll.releasePointerCapture(event.pointerId); } catch (err) {}
+      if (typeof endEvent.clientX === 'number') seekPreview(timelineTimeFromClientX(endEvent.clientX));
+    };
+
+    timelineScroll.addEventListener('pointermove', onScrubMove);
+    timelineScroll.addEventListener('pointerup', onScrubEnd);
+    timelineScroll.addEventListener('pointercancel', onScrubEnd);
   };
   document.querySelectorAll('.track').forEach(track => {
     track.addEventListener('dragover', event => {
@@ -743,10 +808,6 @@ function bindTimelineInteractions() {
       toggleTrackSolo(Number(event.currentTarget.dataset.track));
     });
   });
-
-  $('ruler').onclick = event => {
-    seekPreview(timelineTimeFromClientX(event.clientX));
-  };
 
   document.querySelectorAll('.clip').forEach(el => {
     el.onpointerdown = event => {
@@ -971,7 +1032,7 @@ function renderTransport() {
 function fitTimeline(shouldRender = true) {
   const scroll = $('timelineScroll');
   const available = Math.max(320, (scroll ? scroll.clientWidth : window.innerWidth) - labelWidth - 120);
-  const next = Math.min(120, available / Math.max(1, projectDuration()));
+  const next = Math.min(maxZoom, available / Math.max(1, projectDuration()));
   pxPerSec = Math.round(clampZoom(next) * 100) / 100;
   if ($('zoomSlider')) $('zoomSlider').value = String(pxPerSec);
   if (shouldRender) renderTimeline();
@@ -982,7 +1043,7 @@ async function probeProjectMedia() {
   let changed = false;
   for (const asset of assets) {
     changed = await probeAssetMetadata(asset) || changed;
-    if (asset.hasAudio !== false && (!Array.isArray(asset.waveform) || asset.waveform.length < 256)) {
+    if (asset.hasAudio !== false && (!Array.isArray(asset.waveform) || asset.waveform.length < waveformPointTarget)) {
       const waveform = await computeWaveform(asset);
       if (waveform.length) {
         asset.waveform = waveform;
@@ -1044,7 +1105,7 @@ async function computeWaveform(asset) {
     const audioContext = new AudioContextClass();
     const buffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
     const channel = buffer.getChannelData(0);
-    const targetPoints = 1024;
+    const targetPoints = waveformPointTarget;
     const bucket = Math.max(1, Math.floor(channel.length / targetPoints));
     const peaks = [];
     for (let i = 0; i < channel.length; i += bucket) {
@@ -1169,6 +1230,7 @@ function bindChrome() {
   };
   bindMediaBinDrop();
   bindPanelResizers();
+  bindGlobalTooltips();
   window.addEventListener('keydown', event => {
     if (event.target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName)) return;
     if (event.code === 'Space') { event.preventDefault(); isPlaying ? pausePreview() : playPreview(); }
@@ -1230,6 +1292,83 @@ function bindPanelResizers() {
     }
   });
   window.addEventListener('pointerup', () => { drag = null; });
+}
+
+function bindGlobalTooltips() {
+  let target = null;
+  let tooltip = null;
+  const selector = '[title], [data-tooltip]';
+
+  const ensureTooltip = () => {
+    if (tooltip) return tooltip;
+    tooltip = document.createElement('div');
+    tooltip.className = 'app-tooltip';
+    tooltip.hidden = true;
+    document.body.appendChild(tooltip);
+    return tooltip;
+  };
+
+  const textFor = element => element.getAttribute('title') || element.dataset.tooltip || element.getAttribute('aria-label') || '';
+
+  const positionTooltip = () => {
+    if (!target || !tooltip || tooltip.hidden) return;
+    const rect = target.getBoundingClientRect();
+    const tipRect = tooltip.getBoundingClientRect();
+    const left = clamp(rect.left + rect.width / 2 - tipRect.width / 2, 8, window.innerWidth - tipRect.width - 8);
+    const above = rect.top >= tipRect.height + 10;
+    const top = above
+      ? rect.top - tipRect.height - 8
+      : Math.min(window.innerHeight - tipRect.height - 8, rect.bottom + 8);
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = Math.max(8, top) + 'px';
+  };
+
+  const showTooltip = element => {
+    if (!element || element.disabled) return;
+    const text = textFor(element);
+    if (!text) return;
+    if (element.hasAttribute('title')) {
+      element.dataset.tooltip = element.getAttribute('title');
+      element.removeAttribute('title');
+    }
+    target = element;
+    const tip = ensureTooltip();
+    tip.textContent = text;
+    tip.hidden = false;
+    positionTooltip();
+  };
+
+  const hideTooltip = () => {
+    if (tooltip) tooltip.hidden = true;
+    if (target && target.dataset.tooltip && !target.hasAttribute('title')) target.setAttribute('title', target.dataset.tooltip);
+    target = null;
+  };
+
+  document.addEventListener('pointerover', event => {
+    const element = event.target.closest(selector);
+    if (element) showTooltip(element);
+  });
+  document.addEventListener('pointermove', positionTooltip);
+  document.addEventListener('pointerout', event => {
+    if (target && (!event.relatedTarget || !target.contains(event.relatedTarget))) hideTooltip();
+  });
+  document.addEventListener('mouseover', event => {
+    const element = event.target.closest(selector);
+    if (element) showTooltip(element);
+  });
+  document.addEventListener('mousemove', event => {
+    const element = event.target.closest(selector);
+    if (element && element !== target) showTooltip(element);
+    if (!element && target) hideTooltip();
+    positionTooltip();
+  });
+  document.addEventListener('mouseout', event => {
+    if (target && (!event.relatedTarget || !target.contains(event.relatedTarget))) hideTooltip();
+  });
+  document.addEventListener('focusin', event => showTooltip(event.target.closest(selector)));
+  document.addEventListener('focusout', hideTooltip);
+  window.addEventListener('scroll', positionTooltip, true);
+  window.addEventListener('resize', positionTooltip);
 }
 
 bindChrome();

@@ -91,28 +91,21 @@ button:disabled { opacity: .42; cursor: default; }
 .fa-lock { --fa-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M144 224v-56a112 112 0 0 1 224 0v56h32v224H112V224h32zm64 0h96v-56a48 48 0 0 0-96 0v56z' fill='black'/%3E%3C/svg%3E"); }
 .fa-film { --fa-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M80 96h352v320H80V96zm48 32v48h48v-48h-48zm208 0v48h48v-48h-48zM128 336v48h48v-48h-48zm208 0v48h48v-48h-48z' fill='black'/%3E%3C/svg%3E"); }
 .fa-wave-square { --fa-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M48 280h80v-96h80v208h96V120h80v160h80v56H328v-96h-48v208H184V240h-32v96H48v-56z' fill='black'/%3E%3C/svg%3E"); }
-.icon-btn[title]:hover::after,
-.tool[title]:hover::after {
-  content: attr(title);
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 40;
-  white-space: nowrap;
+.app-tooltip {
+  position: fixed;
+  z-index: 9999;
+  max-width: 260px;
   padding: 5px 8px;
   border: 1px solid var(--line-strong);
   border-radius: 5px;
   background: #050507;
   color: var(--paper);
-  font-size: 11px;
   font-family: var(--mono);
-  box-shadow: 0 8px 18px rgba(0,0,0,.35);
-}
-.timeline-toolbar .icon-btn[title]:hover::after,
-.timeline-toolbar .tool[title]:hover::after {
-  top: auto;
-  bottom: calc(100% + 8px);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 10px 24px rgba(0,0,0,.42);
 }
 input, select { width: 100%; padding: 4px 7px; }
 label {
@@ -165,6 +158,7 @@ label {
     "timeline timeline timeline";
   gap: 1px;
   background: var(--line);
+  overflow: hidden;
 }
 .media-bin, .viewer-panel, .inspector-panel, .timeline-panel {
   min-width: 0;
@@ -180,6 +174,7 @@ label {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
   min-height: 0;
+  overflow: hidden;
 }
 .inspector-panel {
   border-right: 1px solid var(--line);
@@ -189,7 +184,13 @@ label {
   gap: 8px;
   min-height: 0;
 }
-.timeline-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: 38px 1fr; }
+.timeline-workspace {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 38px 1fr;
+  overflow: hidden;
+}
 .panel-resizer { background: #0b0c11; z-index: 10; }
 .col-resizer { grid-area: col; cursor: col-resize; }
 .row-resizer { grid-area: row; cursor: row-resize; }
@@ -345,14 +346,26 @@ h2 { margin: 2px 0 0; font-size: 15px; }
 }
 .two-col { display: grid; grid-template-columns: 1fr 120px; gap: 10px; }
 .timeline-toolbar {
-  display: flex;
+  position: relative;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   padding: 0 10px 0 12px;
   border-bottom: 1px solid var(--line);
+  background: var(--ink-2);
+  overflow: visible;
+  width: 100%;
+  min-width: 0;
 }
-.timeline-title { display: flex; align-items: center; gap: 8px; }
+.timeline-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
 .tool {
   font-family: var(--mono);
   font-size: 12px;
@@ -362,19 +375,36 @@ h2 { margin: 2px 0 0; font-size: 15px; }
   color: var(--orange);
   background: rgba(255,122,77,.12);
 }
-.zoom-group { display: flex; align-items: center; gap: 8px; }
-.zoom-group input { width: 160px; accent-color: var(--blue); }
+.zoom-group {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 254px;
+}
+.zoom-group input {
+  flex: 0 0 154px;
+  width: 154px;
+  min-width: 120px;
+  accent-color: var(--blue);
+}
 .timeline-body {
   min-height: 0;
+  min-width: 0;
   display: block;
+  overflow: hidden;
 }
 .timeline-scroll {
   position: relative;
   overflow: auto;
   background: #11131a;
   height: 100%;
+  width: 100%;
+  min-width: 0;
   user-select: none;
+  cursor: default;
 }
+.timeline-scroll.scrubbing { cursor: ew-resize; }
 .ruler {
   position: relative;
   height: 32px;
@@ -400,7 +430,7 @@ h2 { margin: 2px 0 0; font-size: 15px; }
 }
 .track {
   position: relative;
-  height: 68px;
+  height: 76px;
   border-bottom: 1px solid var(--line);
   background: linear-gradient(90deg, rgba(108,134,255,.08), transparent);
   user-select: none;
@@ -413,24 +443,30 @@ h2 { margin: 2px 0 0; font-size: 15px; }
   left: 0;
   z-index: 3;
   width: 112px;
-  height: 68px;
+  height: 76px;
   padding: 7px 7px;
   border-right: 1px solid var(--line);
   background: rgba(14,15,21,.94);
   font-family: var(--mono);
   font-size: 10px;
   color: var(--paper-2);
+  overflow: visible;
 }
 .track-label-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  height: 24px;
 }
 .track-controls {
   display: flex;
   gap: 4px;
-  margin-top: 8px;
+  position: absolute;
+  left: 7px;
+  right: 7px;
+  bottom: 7px;
+  margin-top: 0;
 }
 .track-label button {
   width: 22px;
@@ -444,31 +480,31 @@ h2 { margin: 2px 0 0; font-size: 15px; }
 }
 .clip {
   position: absolute;
-  top: 11px;
-  height: 46px;
+  top: 8px;
+  height: 60px;
   min-width: 24px;
   border-radius: 6px;
   border: 1px solid rgba(108,134,255,.58);
   background: rgba(108,134,255,.24);
   color: var(--paper);
-  padding: 7px 10px;
+  padding: 6px 10px;
   overflow: hidden;
   cursor: grab;
   user-select: none;
 }
 .clip.dragging { opacity: .76; }
 .clip.audio {
-  border-color: rgba(52,211,153,.58);
-  background: rgba(52,211,153,.18);
+  border-color: rgba(22,146,199,.72);
+  background: rgba(9,59,104,.86);
 }
 .clip-waveform {
   position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 3px;
-  height: 14px;
-  width: calc(100% - 16px);
-  opacity: .88;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 32px;
+  width: 100%;
+  opacity: 1;
   pointer-events: none;
 }
 .clip.selected {
@@ -477,10 +513,10 @@ h2 { margin: 2px 0 0; font-size: 15px; }
 }
 .clip b { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
 .clip b i { margin-right: 5px; color: rgba(242,235,221,.75); }
-.clip span { display: block; margin-top: 2px; font-family: var(--mono); color: var(--paper-2); font-size: 10px; }
+.clip span { display: block; margin-top: 1px; font-family: var(--mono); color: var(--paper-2); font-size: 10px; }
 .clip-content {
   position: relative;
-  z-index: 1;
+  z-index: 2;
   pointer-events: none;
 }
 .handle {

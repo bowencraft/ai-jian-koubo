@@ -30,7 +30,7 @@ function normalizeProject(project) {
     if (Array.isArray(asset.waveform)) {
       normalized.waveform = asset.waveform
         .map(value => Math.max(0, Math.min(1, numeric(value, 0))))
-        .slice(0, 1024);
+        .slice(0, 4096);
     }
     assetById.set(id, normalized);
     return normalized;
