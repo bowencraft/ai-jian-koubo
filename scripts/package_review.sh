@@ -66,15 +66,41 @@ copy_dir_if_exists() {
   fi
 }
 
+copy_json_without_waveforms() {
+  local src="$1"
+  local dst="$2"
+  if [ ! -f "$src" ]; then
+    return
+  fi
+  node - "$src" "$dst" <<'NODE'
+const fs = require('fs');
+const src = process.argv[2];
+const dst = process.argv[3];
+function strip(value) {
+  if (Array.isArray(value)) return value.map(strip);
+  if (value && typeof value === 'object') {
+    const out = {};
+    Object.entries(value).forEach(([key, child]) => {
+      if (key !== 'waveform') out[key] = strip(child);
+    });
+    return out;
+  }
+  return value;
+}
+const data = JSON.parse(fs.readFileSync(src, 'utf8'));
+fs.writeFileSync(dst, JSON.stringify(strip(data), null, 2));
+NODE
+}
+
 cp "$REVIEW_DIR/review.html" "$PACKAGE_DIR/review/review.html"
-cp "$REVIEW_DIR/data.json" "$PACKAGE_DIR/review/data.json"
+copy_json_without_waveforms "$REVIEW_DIR/data.json" "$PACKAGE_DIR/review/data.json"
 cp "$REVIEW_DIR/audio.mp3" "$PACKAGE_DIR/review/audio.mp3"
 copy_if_exists "$REVIEW_DIR/editor.html" "$PACKAGE_DIR/review/editor.html"
 copy_if_exists "$REVIEW_DIR/editor.css" "$PACKAGE_DIR/review/editor.css"
 copy_if_exists "$REVIEW_DIR/editor.js" "$PACKAGE_DIR/review/editor.js"
 copy_if_exists "$REVIEW_DIR/review.css" "$PACKAGE_DIR/review/review.css"
 copy_if_exists "$REVIEW_DIR/review.js" "$PACKAGE_DIR/review/review.js"
-copy_if_exists "$REVIEW_DIR/project.json" "$PACKAGE_DIR/review/project.json"
+copy_json_without_waveforms "$REVIEW_DIR/project.json" "$PACKAGE_DIR/review/project.json"
 copy_if_exists "$REVIEW_DIR/review_draft.json" "$PACKAGE_DIR/review/review_draft.json"
 copy_if_exists "$REVIEW_DIR/peaks.json" "$PACKAGE_DIR/review/peaks.json"
 copy_if_exists "$REVIEW_DIR/silence_periods.json" "$PACKAGE_DIR/review/silence_periods.json"

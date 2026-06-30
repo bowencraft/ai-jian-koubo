@@ -118,6 +118,14 @@ function createLegacyProject({ videoFile, duration }) {
   });
 }
 
+function stripProjectWaveforms(project) {
+  const normalized = normalizeProject(project);
+  return {
+    ...normalized,
+    assets: normalized.assets.map(({ waveform, ...asset }) => asset),
+  };
+}
+
 function subtractRanges(start, end, ranges) {
   let pieces = [{ start, end }];
   ranges.forEach((range) => {
@@ -176,6 +184,7 @@ function getProjectDuration(project) {
 
 module.exports = {
   normalizeProject,
+  stripProjectWaveforms,
   createLegacyProject,
   applyTimelineDeletes,
   getProjectDuration,

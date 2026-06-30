@@ -1214,9 +1214,14 @@ function importProjectJson(file) {
   reader.readAsText(file);
 }
 
+function projectForExchange() {
+  ensureTimeline();
+  return JSON.parse(JSON.stringify(project, (key, value) => key === 'waveform' ? undefined : value));
+}
+
 function exportProjectJson() {
   ensureTimeline();
-  const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify(projectForExchange(), null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;

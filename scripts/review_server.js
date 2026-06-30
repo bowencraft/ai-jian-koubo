@@ -15,7 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { buildFcpxml, buildTimelineFcpxml } = require('./lib/fcpxml');
-const { createLegacyProject, normalizeProject } = require('./lib/timeline_project');
+const { createLegacyProject, normalizeProject, stripProjectWaveforms } = require('./lib/timeline_project');
 
 const PORT = process.argv[2] || 8899;
 const VIDEO_FILE = process.argv[3];
@@ -54,6 +54,52 @@ const reviewDuration = reviewWords.reduce((max, w) => {
 }, 0);
 
 const PROJECT_FILE = path.resolve('project.json');
+const WAVEFORM_CACHE_FILE = path.resolve('waveform_cache.json');
+
+function readWaveformCache() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(WAVEFORM_CACHE_FILE, 'utf8'));
+    return parsed && typeof parsed === 'object' && parsed.assets && typeof parsed.assets === 'object'
+      ? parsed.assets
+      : {};
+  } catch (err) {
+    return {};
+  }
+}
+
+function writeWaveformCache(project) {
+  const previous = readWaveformCache();
+  const assets = {};
+  project.assets.forEach((asset) => {
+    if (Array.isArray(asset.waveform) && asset.waveform.length) {
+      assets[asset.id] = asset.waveform;
+    } else if (Array.isArray(previous[asset.id])) {
+      assets[asset.id] = previous[asset.id];
+    }
+  });
+  if (Object.keys(assets).length) {
+    fs.writeFileSync(WAVEFORM_CACHE_FILE, JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      assets,
+    }));
+  } else if (fs.existsSync(WAVEFORM_CACHE_FILE)) {
+    fs.unlinkSync(WAVEFORM_CACHE_FILE);
+  }
+}
+
+function attachCachedWaveforms(project) {
+  const cache = readWaveformCache();
+  if (!Object.keys(cache).length) return project;
+  return normalizeProject({
+    ...project,
+    assets: project.assets.map(asset => (
+      Array.isArray(asset.waveform) || !Array.isArray(cache[asset.id])
+        ? asset
+        : { ...asset, waveform: cache[asset.id] }
+    )),
+  });
+}
 
 function reviewReady() {
   return fs.existsSync('data.json') && fs.existsSync('review.html');
@@ -61,7 +107,7 @@ function reviewReady() {
 
 function readProject() {
   if (fs.existsSync(PROJECT_FILE)) {
-    return normalizeProject(JSON.parse(fs.readFileSync(PROJECT_FILE, 'utf8')));
+    return attachCachedWaveforms(normalizeProject(JSON.parse(fs.readFileSync(PROJECT_FILE, 'utf8'))));
   }
   if (!VIDEO_FILE) {
     return normalizeProject({ version: 1, name: path.basename(process.cwd()), assets: [], clips: [] });
@@ -73,8 +119,9 @@ function readProject() {
 
 function writeProject(project) {
   const normalized = normalizeProject(project);
+  writeWaveformCache(normalized);
   fs.writeFileSync(PROJECT_FILE, JSON.stringify({
-    ...normalized,
+    ...stripProjectWaveforms(normalized),
     updatedAt: new Date().toISOString(),
   }, null, 2));
   return normalized;
