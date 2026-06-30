@@ -17,7 +17,9 @@ let waveformDrawRaf = null;
 const labelWidth = 112;
 const trackHeight = 76;
 const minClipDuration = 0.1;
-const waveformPointTarget = 4096;
+const waveformPointMin = 4096;
+const waveformPointMax = 196608;
+const waveformPointsPerSecond = 20;
 const maxZoom = 120;
 const hiddenPlayers = new Map();
 const $ = id => document.getElementById(id);
@@ -665,6 +667,13 @@ function renderWaveform(clip, asset) {
 }
 
 const WaveformRenderer = {
+  percentile(values, ratio) {
+    if (!values.length) return 0;
+    const sorted = Array.from(values).sort((a, b) => a - b);
+    const index = clamp(Math.floor((sorted.length - 1) * ratio), 0, sorted.length - 1);
+    return sorted[index] || 0;
+  },
+
   draw(canvas, peaks, clip, assetDuration) {
     const rect = canvas.getBoundingClientRect();
     const width = Math.max(1, Math.floor(rect.width));
@@ -712,7 +721,14 @@ const WaveformRenderer = {
       } else {
         for (let i = from; i < to; i++) peak = Math.max(peak, Math.abs(Number(peaks[i]) || 0));
       }
-      envelope[x] = Math.pow(Math.min(1, peak), 0.72);
+      envelope[x] = Math.min(1, peak);
+    }
+
+    const floor = this.percentile(envelope, 0.08);
+    const ceiling = Math.max(this.percentile(envelope, 0.985), floor + 0.01);
+    for (let x = 0; x < width; x++) {
+      const normalized = clamp((envelope[x] - floor) / (ceiling - floor), 0, 1);
+      envelope[x] = Math.pow(normalized, 1.18);
     }
 
     ctx.fillStyle = 'rgba(18,151,204,.94)';
@@ -1076,16 +1092,24 @@ function fitTimeline(shouldRender = true) {
   if (shouldRender) renderTimeline();
 }
 
+function waveformTargetForAsset(asset) {
+  const duration = Math.max(0, num(asset && asset.duration));
+  return clamp(Math.ceil(duration * waveformPointsPerSecond), waveformPointMin, waveformPointMax);
+}
+
 async function probeProjectMedia() {
   const assets = [...project.assets];
   let changed = false;
   for (const asset of assets) {
     changed = await probeAssetMetadata(asset) || changed;
-    if (asset.hasAudio !== false && (!Array.isArray(asset.waveform) || asset.waveform.length < waveformPointTarget)) {
+    const targetPoints = waveformTargetForAsset(asset);
+    if (asset.hasAudio !== false && (!Array.isArray(asset.waveform) || asset.waveform.length < targetPoints)) {
+      setStatus(`正在生成高精度波形 ${asset.name || ''}...`);
       const waveform = await computeWaveform(asset);
       if (waveform.length) {
         asset.waveform = waveform;
         changed = true;
+        drawTimelineWaveforms();
       }
     }
   }
@@ -1142,18 +1166,26 @@ async function computeWaveform(asset) {
     const arrayBuffer = await res.arrayBuffer();
     const audioContext = new AudioContextClass();
     const buffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-    const channel = buffer.getChannelData(0);
-    const targetPoints = waveformPointTarget;
-    const bucket = Math.max(1, Math.floor(channel.length / targetPoints));
+    const channels = [];
+    for (let channelIndex = 0; channelIndex < buffer.numberOfChannels; channelIndex++) {
+      channels.push(buffer.getChannelData(channelIndex));
+    }
+    const targetPoints = waveformTargetForAsset({ ...asset, duration: buffer.duration || asset.duration });
+    const sampleCount = channels[0] ? channels[0].length : 0;
+    const bucket = Math.max(1, Math.floor(sampleCount / targetPoints));
+    const sampleStride = Math.max(1, Math.floor(bucket / 256));
     const peaks = [];
-    for (let i = 0; i < channel.length; i += bucket) {
+    for (let i = 0; i < sampleCount; i += bucket) {
       let max = 0;
-      const end = Math.min(channel.length, i + bucket);
-      for (let j = i; j < end; j++) {
-        const v = Math.abs(channel[j]);
-        if (v > max) max = v;
+      const end = Math.min(sampleCount, i + bucket);
+      for (let j = i; j < end; j += sampleStride) {
+        for (let channelIndex = 0; channelIndex < channels.length; channelIndex++) {
+          const v = Math.abs(channels[channelIndex][j] || 0);
+          if (v > max) max = v;
+        }
       }
       peaks.push(+max.toFixed(3));
+      if (peaks.length % 512 === 0) await new Promise(resolve => requestAnimationFrame(resolve));
       if (peaks.length >= targetPoints) break;
     }
     if (audioContext.close) audioContext.close();
