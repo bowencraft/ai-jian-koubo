@@ -55,6 +55,10 @@ const reviewDuration = reviewWords.reduce((max, w) => {
 
 const PROJECT_FILE = path.resolve('project.json');
 
+function reviewReady() {
+  return fs.existsSync('data.json') && fs.existsSync('review.html');
+}
+
 function readProject() {
   if (fs.existsSync(PROJECT_FILE)) {
     return normalizeProject(JSON.parse(fs.readFileSync(PROJECT_FILE, 'utf8')));
@@ -183,7 +187,7 @@ const server = http.createServer((req, res) => {
     try {
       timelineProject = readProject();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, project: timelineProject, reviewDuration }));
+      res.end(JSON.stringify({ success: true, project: timelineProject, reviewDuration, reviewReady: reviewReady() }));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: err.message }));
@@ -219,7 +223,7 @@ const server = http.createServer((req, res) => {
         const parsed = JSON.parse(body || '{}');
         timelineProject = writeProject(parsed.project || parsed);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, project: timelineProject }));
+        res.end(JSON.stringify({ success: true, project: timelineProject, reviewReady: reviewReady() }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: err.message }));
@@ -265,7 +269,7 @@ const server = http.createServer((req, res) => {
           assets: currentProject.assets.concat(asset),
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, asset, project: timelineProject }));
+        res.end(JSON.stringify({ success: true, asset, project: timelineProject, reviewReady: reviewReady() }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: err.message }));

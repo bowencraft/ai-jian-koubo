@@ -4,18 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>素材编辑 / Multitrack</title>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <link rel="stylesheet" href="./editor.css">
 </head>
 <body>
   <div class="topbar">
     <div class="brand">剪<em>播客</em></div>
-    <div class="transport" aria-label="播放控制">
-      <button class="icon-btn" id="jumpStartBtn" title="回到时间线开头" aria-label="回到时间线开头"><i class="fa-solid fa-backward-step"></i></button>
-      <button class="icon-btn play-btn" id="playBtn" title="播放或暂停预览" aria-label="播放或暂停预览"><i class="fa-solid fa-play"></i></button>
-      <button class="icon-btn" id="stopBtn" title="停止并回到开头" aria-label="停止并回到开头"><i class="fa-solid fa-stop"></i></button>
-      <span class="time-display"><span id="timeCur">00:00</span><span>/</span><span id="timeTot">00:00</span></span>
-    </div>
     <div class="actions">
       <div class="status" id="status">加载中...</div>
       <button class="icon-btn" id="importProjectBtn" title="导入项目 JSON" aria-label="导入项目 JSON"><i class="fa-solid fa-file-import"></i></button>
@@ -56,6 +49,12 @@
         <div class="viewer-empty" id="viewerEmpty">当前时间没有视频画面</div>
         <div class="viewer-timecode" id="viewerTimecode">00:00:00</div>
       </div>
+      <div class="viewer-transport transport" aria-label="播放控制">
+        <button class="icon-btn" id="jumpStartBtn" title="回到时间线开头" aria-label="回到时间线开头"><i class="fa-solid fa-backward-step"></i></button>
+        <button class="icon-btn play-btn" id="playBtn" title="播放或暂停预览" aria-label="播放或暂停预览"><i class="fa-solid fa-play"></i></button>
+        <button class="icon-btn" id="stopBtn" title="停止并回到开头" aria-label="停止并回到开头"><i class="fa-solid fa-stop"></i></button>
+        <span class="time-display"><span id="timeCur">00:00</span><span>/</span><span id="timeTot">00:00</span></span>
+      </div>
     </section>
 
     <div class="panel-resizer col-resizer" id="colResizer" title="拖动调整素材库宽度"></div>
@@ -70,7 +69,6 @@
           </div>
           <button class="icon-btn danger" id="deleteClipBtn" title="删除选中的片段" aria-label="删除选中的片段"><i class="fa-solid fa-trash-can"></i></button>
         </div>
-        <div class="notice" id="staleNotice">项目已修改。回到审核页后，可选择重新转文字和智能裁切，或继续沿用当前审核选择。</div>
         <div class="inspector-grid" id="inspector">
           <div class="empty-hint">在时间线上选择一个片段进行精调</div>
         </div>
@@ -88,17 +86,12 @@
           </div>
           <div class="zoom-group">
             <button class="icon-btn" id="zoomOutBtn" title="缩小时间线" aria-label="缩小时间线"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
-            <input id="zoomSlider" type="range" min="1" max="90" value="34" aria-label="时间线缩放">
+            <input id="zoomSlider" type="range" min="0.05" max="120" step="0.05" value="34" aria-label="时间线缩放">
             <button class="icon-btn" id="zoomInBtn" title="放大时间线" aria-label="放大时间线"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
             <button class="icon-btn" id="fitTimelineBtn" title="适配整段时间线" aria-label="适配整段时间线"><i class="fa-solid fa-expand"></i></button>
           </div>
         </div>
         <div class="timeline-body">
-          <div class="track-tools">
-            <button class="tool active" title="显示视频轨" aria-label="显示视频轨"><i class="fa-solid fa-video"></i></button>
-            <button class="tool active" title="显示音频轨" aria-label="显示音频轨"><i class="fa-solid fa-volume-high"></i></button>
-            <button class="tool" title="轨道锁定占位" aria-label="轨道锁定占位"><i class="fa-solid fa-lock"></i></button>
-          </div>
           <div class="timeline-scroll" id="timelineScroll">
             <div class="ruler" id="ruler"></div>
             <div class="tracks" id="tracks"></div>

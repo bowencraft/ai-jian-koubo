@@ -11,9 +11,11 @@ let lastTick = 0;
 let snapEnabled = true;
 let currentTool = 'select';
 let pendingMetadataProbe = null;
+let reviewReady = false;
 
-const labelWidth = 92;
+const labelWidth = 112;
 const trackHeight = 68;
+const minClipDuration = 0.1;
 const hiddenPlayers = new Map();
 const $ = id => document.getElementById(id);
 const uid = prefix => prefix + '-' + Math.random().toString(16).slice(2, 10);
@@ -27,8 +29,11 @@ function setStatus(text) {
 
 function setDirty(value) {
   dirty = value;
-  $('staleNotice').style.display = dirty ? 'block' : 'none';
-  setStatus(dirty ? '有未保存修改' : '已保存');
+  setStatus(dirty ? '有未保存修改' : savedStatusText());
+}
+
+function savedStatusText() {
+  return reviewReady ? '已保存' : '已保存，可回到聊天框开始创建审核';
 }
 
 function ensureTimeline() {
@@ -39,6 +44,14 @@ function ensureTimeline() {
   const needed = project.clips.reduce((max, clip) => Math.max(max, Math.floor(num(clip.trackIndex, num(clip.lane, 0))) + 1), 0);
   const requested = Math.floor(num(project.timeline.trackCount, 4));
   project.timeline.trackCount = Math.max(4, requested, needed);
+  const existingTracks = Array.isArray(project.timeline.tracks) ? project.timeline.tracks : [];
+  project.timeline.tracks = Array.from({ length: project.timeline.trackCount }, (_, index) => {
+    const current = existingTracks[index] && typeof existingTracks[index] === 'object' ? existingTracks[index] : {};
+    return {
+      disabled: current.disabled === true,
+      solo: current.solo === true,
+    };
+  });
   project.version = project.version || 1;
   project.name = project.name || 'multitrack_project';
 }
@@ -65,11 +78,99 @@ function normalizeClientProject(nextProject) {
       };
     });
   ensureTimeline();
+  repairTimelineConstraints();
 }
 
 function projectDuration() {
   ensureTimeline();
   return Math.max(20, reviewDuration, ...project.clips.map(c => num(c.timelineStart) + num(c.duration)));
+}
+
+function mediaDurationForClip(clip) {
+  const asset = project.assets.find(item => item.id === clip.assetId);
+  return Math.max(minClipDuration, num(asset && asset.duration, clip.duration || minClipDuration));
+}
+
+function maxDurationForClip(clip) {
+  return Math.max(minClipDuration, mediaDurationForClip(clip) - num(clip.sourceStart));
+}
+
+function trackState(index) {
+  ensureTimeline();
+  return project.timeline.tracks[index] || { disabled: false, solo: false };
+}
+
+function hasSoloTracks() {
+  ensureTimeline();
+  return project.timeline.tracks.some(track => track && track.solo);
+}
+
+function isTrackActive(index) {
+  const state = trackState(index);
+  if (state.disabled) return false;
+  const soloMode = hasSoloTracks();
+  return !soloMode || state.solo;
+}
+
+function clipsOnTrack(trackIndex, exceptClipId) {
+  return project.clips
+    .filter(clip => clip.trackIndex === trackIndex && clip.id !== exceptClipId)
+    .sort((a, b) => a.timelineStart - b.timelineStart);
+}
+
+function availableStartOnTrack(clipId, trackIndex, desiredStart, duration) {
+  const safeDuration = Math.max(minClipDuration, num(duration, minClipDuration));
+  const clips = clipsOnTrack(trackIndex, clipId);
+  const intervals = [];
+  let cursor = 0;
+  clips.forEach(clip => {
+    const end = Math.max(0, num(clip.timelineStart));
+    if (end - cursor >= safeDuration) intervals.push({ start: cursor, end: end - safeDuration });
+    cursor = Math.max(cursor, num(clip.timelineStart) + num(clip.duration));
+  });
+  intervals.push({ start: cursor, end: Infinity });
+  const target = Math.max(0, snapTime(desiredStart));
+  let best = intervals[0].start;
+  let bestDistance = Infinity;
+  intervals.forEach(interval => {
+    const candidate = clamp(target, interval.start, interval.end);
+    const distance = Math.abs(candidate - target);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  });
+  return snapTime(best);
+}
+
+function maxEndOnTrack(clip) {
+  const next = clipsOnTrack(clip.trackIndex, clip.id)
+    .find(other => other.timelineStart >= clip.timelineStart);
+  return next ? Math.max(clip.timelineStart + minClipDuration, next.timelineStart) : Infinity;
+}
+
+function minStartOnTrack(clip) {
+  const previous = clipsOnTrack(clip.trackIndex, clip.id)
+    .filter(other => other.timelineStart + other.duration <= clip.timelineStart + clip.duration)
+    .pop();
+  return previous ? previous.timelineStart + previous.duration : 0;
+}
+
+function normalizeClipToBounds(clip) {
+  const mediaDuration = mediaDurationForClip(clip);
+  clip.sourceStart = clamp(num(clip.sourceStart), 0, Math.max(0, mediaDuration - minClipDuration));
+  clip.duration = clamp(num(clip.duration, minClipDuration), minClipDuration, mediaDuration - clip.sourceStart);
+  clip.trackIndex = clamp(Math.floor(num(clip.trackIndex)), 0, project.timeline.trackCount - 1);
+  clip.lane = clip.trackIndex;
+  clip.timelineStart = availableStartOnTrack(clip.id, clip.trackIndex, num(clip.timelineStart), clip.duration);
+  return clip;
+}
+
+function repairTimelineConstraints() {
+  ensureTimeline();
+  project.clips
+    .sort((a, b) => a.trackIndex - b.trackIndex || a.timelineStart - b.timelineStart)
+    .forEach(normalizeClipToBounds);
 }
 
 function snapTime(value) {
@@ -82,6 +183,7 @@ async function loadProject() {
   if (!data.success) throw new Error(data.error || '读取项目失败');
   normalizeClientProject(data.project);
   reviewDuration = data.reviewDuration || 0;
+  reviewReady = data.reviewReady === true;
   fitTimeline(false);
   render();
   setDirty(false);
@@ -102,18 +204,22 @@ async function saveProject() {
     return false;
   }
   normalizeClientProject(data.project);
+  if (typeof data.reviewReady === 'boolean') reviewReady = data.reviewReady;
   render();
   setDirty(false);
   return true;
 }
 
-function markNeedsTranscript() {
+async function markNeedsTranscript() {
+  if (!reviewReady) return;
   project.transcript = {
     status: 'stale',
     reason: 'timeline edited by human',
     markedAt: new Date().toISOString()
   };
   setDirty(true);
+  setStatus('已标记重转录，正在保存...');
+  await saveProject();
 }
 
 function inferKindFromFile(file) {
@@ -134,6 +240,7 @@ async function uploadFiles(files) {
     const data = await res.json();
     if (!data.success) throw new Error(data.error || `上传失败: ${file.name}`);
     if (data.project) normalizeClientProject(data.project);
+    if (typeof data.reviewReady === 'boolean') reviewReady = data.reviewReady;
     if (data.asset && data.asset.id) selectedAssetId = data.asset.id;
   }
   render();
@@ -169,12 +276,13 @@ function addClipFromAsset(assetId, trackIndex, timelineStart) {
   ensureTimeline();
   const asset = project.assets.find(a => a.id === assetId);
   if (!asset) return;
-  const duration = Math.max(1, num(asset.duration, 10) || 10);
+  const duration = Math.max(minClipDuration, num(asset.duration, 10) || 10);
   const safeTrack = clamp(Math.floor(num(trackIndex, 0)), 0, project.timeline.trackCount - 1);
+  const safeStart = availableStartOnTrack(null, safeTrack, timelineStart, duration);
   const clip = {
     id: uid('clip'),
     assetId,
-    timelineStart: Math.max(0, snapTime(timelineStart)),
+    timelineStart: safeStart,
     sourceStart: 0,
     duration,
     trackIndex: safeTrack,
@@ -194,11 +302,11 @@ function updateClip(id, patch, shouldRender = true) {
   project.clips = project.clips.map(clip => {
     if (clip.id !== id) return clip;
     const next = { ...clip, ...patch };
-    next.timelineStart = Math.max(0, snapTime(num(next.timelineStart)));
     next.sourceStart = Math.max(0, num(next.sourceStart));
-    next.duration = Math.max(0.1, num(next.duration, 0.1));
+    next.duration = Math.max(minClipDuration, num(next.duration, minClipDuration));
     next.trackIndex = clamp(Math.floor(num(next.trackIndex)), 0, project.timeline.trackCount - 1);
     next.lane = next.trackIndex;
+    normalizeClipToBounds(next);
     return next;
   });
   setDirty(true);
@@ -220,6 +328,7 @@ function deleteSelectedClip() {
 function addTrack() {
   ensureTimeline();
   project.timeline.trackCount += 1;
+  project.timeline.tracks.push({ disabled: false, solo: false });
   setDirty(true);
   renderTimeline();
 }
@@ -238,9 +347,30 @@ function deleteTrack(trackIndex = project.timeline.trackCount - 1) {
       clip.lane = clip.trackIndex;
     }
   });
+  project.timeline.tracks.splice(index, 1);
   project.timeline.trackCount -= 1;
   setDirty(true);
   renderTimeline();
+}
+
+function toggleTrackDisabled(trackIndex) {
+  ensureTimeline();
+  const state = trackState(trackIndex);
+  state.disabled = !state.disabled;
+  if (state.disabled) state.solo = false;
+  setDirty(true);
+  renderTimeline();
+  syncPreview();
+}
+
+function toggleTrackSolo(trackIndex) {
+  ensureTimeline();
+  const state = trackState(trackIndex);
+  if (state.disabled) state.disabled = false;
+  state.solo = !state.solo;
+  setDirty(true);
+  renderTimeline();
+  syncPreview();
 }
 
 function splitClipAt(clipId, time) {
@@ -280,10 +410,21 @@ function splitAtPlayhead() {
 
 function render() {
   ensureTimeline();
+  renderFlowButtons();
   renderAssets();
   renderInspector();
   renderTimeline();
   renderTransport();
+}
+
+function renderFlowButtons() {
+  const reviewBtn = $('reviewBtn');
+  const staleBtn = $('staleBtn');
+  if (!reviewBtn || !staleBtn) return;
+  reviewBtn.disabled = !reviewReady;
+  staleBtn.disabled = !reviewReady;
+  reviewBtn.title = reviewReady ? '回到审核页' : '当前项目还未生成审核页。保存后回到聊天框，让 AI 开始创建审核';
+  staleBtn.title = reviewReady ? '标记需要重新转文字和智能裁切' : '首次创建项目时还没有转文字结果，无需标记重转录';
 }
 
 function renderAssets() {
@@ -429,6 +570,7 @@ function renderTimeline() {
   const duration = Math.ceil(projectDuration());
   const scroll = $('timelineScroll');
   const minWidth = scroll ? scroll.clientWidth : window.innerWidth;
+  pxPerSec = clampZoom(pxPerSec);
   const width = Math.max(minWidth, labelWidth + duration * pxPerSec + 180);
   $('ruler').style.width = width + 'px';
   $('tracks').style.width = width + 'px';
@@ -437,7 +579,7 @@ function renderTimeline() {
   $('tracks').style.height = (project.timeline.trackCount * trackHeight) + 'px';
 
   const ticks = [];
-  const tickStep = pxPerSec < 2 ? 120 : pxPerSec < 5 ? 60 : pxPerSec < 12 ? 15 : 5;
+  const tickStep = tickStepForZoom();
   for (let t = 0; t <= duration; t += tickStep) {
     ticks.push(`<div class="tick" style="left:${labelWidth + t * pxPerSec}px">${formatTime(t)}</div>`);
   }
@@ -446,6 +588,7 @@ function renderTimeline() {
   const assets = assetById();
   const rows = [];
   for (let trackIndex = 0; trackIndex < project.timeline.trackCount; trackIndex++) {
+    const state = trackState(trackIndex);
     const clips = project.clips.filter(c => c.trackIndex === trackIndex).map(clip => {
       const asset = assets.get(clip.assetId) || { name: 'missing', kind: 'audio' };
       const isVideo = asset.kind === 'video' || asset.hasVideo;
@@ -456,17 +599,21 @@ function renderTimeline() {
             <b><i class="fa-solid ${isVideo ? 'fa-film' : 'fa-wave-square'}"></i> ${escapeHtml(asset.name)}</b>
             <span>${formatTime(clip.timelineStart)} · ${round1(clip.duration)}s</span>
           </div>
-          ${asset.hasAudio !== false ? renderWaveform(asset) : ''}
+          ${asset.hasAudio !== false ? renderWaveform(clip, asset) : ''}
           <div class="handle right" data-action="trim-right"></div>
         </div>
       `;
     }).join('');
     rows.push(`
-      <div class="track" data-track="${trackIndex}">
+      <div class="track ${state.disabled ? 'disabled' : ''} ${state.solo ? 'solo' : ''}" data-track="${trackIndex}">
         <div class="track-label">
           <div class="track-label-row">
             <span>轨 ${trackIndex + 1}</span>
             <button class="icon-btn mini" data-action="delete-track" data-track="${trackIndex}" title="删除这条空轨道" aria-label="删除这条空轨道"><i class="fa-solid fa-minus"></i></button>
+          </div>
+          <div class="track-controls">
+            <button class="icon-btn mini ${state.disabled ? 'active' : ''}" data-action="toggle-track-disabled" data-track="${trackIndex}" title="禁用或启用本轨" aria-label="禁用或启用本轨"><i class="fa-solid ${state.disabled ? 'fa-volume-xmark' : 'fa-volume-high'}"></i></button>
+            <button class="icon-btn mini ${state.solo ? 'active' : ''}" data-action="toggle-track-solo" data-track="${trackIndex}" title="Solo 本轨监听" aria-label="Solo 本轨监听"><i class="fa-solid fa-headphones"></i></button>
           </div>
         </div>
         ${clips}
@@ -474,27 +621,95 @@ function renderTimeline() {
     `);
   }
   $('tracks').innerHTML = rows.join('');
+  updateZoomControl();
   bindTimelineInteractions();
+  drawTimelineWaveforms();
 }
 
-function renderWaveform(asset) {
-  const peaks = Array.isArray(asset.waveform) && asset.waveform.length ? asset.waveform : fallbackWaveform(asset.id);
-  const bars = peaks.slice(0, 48).map(value => {
-    const h = Math.max(2, Math.round(clamp(Number(value) || 0.08, 0.04, 1) * 12));
-    return `<span style="height:${h}px"></span>`;
-  }).join('');
-  return `<div class="clip-waveform">${bars}</div>`;
+function tickStepForZoom() {
+  if (pxPerSec >= 48) return 1;
+  if (pxPerSec >= 24) return 2;
+  if (pxPerSec >= 10) return 5;
+  if (pxPerSec >= 5) return 10;
+  if (pxPerSec >= 2) return 30;
+  if (pxPerSec >= 0.8) return 60;
+  if (pxPerSec >= 0.25) return 300;
+  return 600;
 }
 
-function fallbackWaveform(seedText) {
-  let seed = String(seedText || 'asset').split('').reduce((sum, ch) => sum + ch.charCodeAt(0), 0);
-  return Array.from({ length: 40 }, () => {
-    seed = (seed * 9301 + 49297) % 233280;
-    return 0.18 + (seed / 233280) * 0.72;
+function minZoomForFit() {
+  const scroll = $('timelineScroll');
+  const available = Math.max(240, (scroll ? scroll.clientWidth : window.innerWidth) - labelWidth - 80);
+  return Math.max(0.05, available / Math.max(1, projectDuration()));
+}
+
+function clampZoom(value) {
+  return clamp(Number(value) || minZoomForFit(), minZoomForFit(), 120);
+}
+
+function updateZoomControl() {
+  const slider = $('zoomSlider');
+  if (!slider) return;
+  const min = minZoomForFit();
+  slider.min = String(Math.round(min * 100) / 100);
+  slider.max = '120';
+  slider.step = '0.05';
+  slider.value = String(Math.round(pxPerSec * 100) / 100);
+}
+
+function renderWaveform(clip, asset) {
+  return `<canvas class="clip-waveform" data-clip-id="${clip.id}" data-asset-id="${asset.id}"></canvas>`;
+}
+
+const WaveformRenderer = {
+  draw(canvas, peaks, clip, assetDuration) {
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(1, Math.floor(rect.width));
+    const height = Math.max(1, Math.floor(rect.height));
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(width * ratio);
+    canvas.height = Math.floor(height * ratio);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    const mid = height / 2;
+    ctx.strokeStyle = 'rgba(242,235,221,.28)';
+    ctx.beginPath();
+    ctx.moveTo(0, mid);
+    ctx.lineTo(width, mid);
+    ctx.stroke();
+    if (!Array.isArray(peaks) || peaks.length < 2 || !(assetDuration > 0)) return;
+    const sourceStart = clamp(num(clip.sourceStart), 0, assetDuration);
+    const sourceEnd = clamp(sourceStart + num(clip.duration), sourceStart, assetDuration);
+    const startIndex = Math.floor((sourceStart / assetDuration) * peaks.length);
+    const endIndex = Math.max(startIndex + 1, Math.ceil((sourceEnd / assetDuration) * peaks.length));
+    const slice = peaks.slice(startIndex, endIndex);
+    ctx.fillStyle = 'rgba(242,235,221,.76)';
+    for (let x = 0; x < width; x++) {
+      const i0 = Math.floor((x / width) * slice.length);
+      const i1 = Math.max(i0 + 1, Math.floor(((x + 1) / width) * slice.length));
+      let peak = 0;
+      for (let i = i0; i < i1; i++) peak = Math.max(peak, Math.abs(Number(slice[i]) || 0));
+      const bar = Math.max(1, peak * (height - 2));
+      ctx.fillRect(x, mid - bar / 2, 1, bar);
+    }
+  }
+};
+
+function drawTimelineWaveforms() {
+  const assets = assetById();
+  document.querySelectorAll('canvas.clip-waveform').forEach(canvas => {
+    const clip = project.clips.find(item => item.id === canvas.dataset.clipId);
+    const asset = clip ? assets.get(clip.assetId) : null;
+    if (!clip || !asset) return;
+    WaveformRenderer.draw(canvas, asset.waveform, clip, num(asset.duration, clip.duration));
   });
 }
 
 function bindTimelineInteractions() {
+  $('timelineScroll').onpointerdown = event => {
+    if (!event.target.closest('input, textarea, select')) event.preventDefault();
+  };
   document.querySelectorAll('.track').forEach(track => {
     track.addEventListener('dragover', event => {
       event.preventDefault();
@@ -514,6 +729,18 @@ function bindTimelineInteractions() {
     btn.addEventListener('click', event => {
       event.stopPropagation();
       deleteTrack(Number(event.currentTarget.dataset.track));
+    });
+  });
+  document.querySelectorAll('[data-action="toggle-track-disabled"]').forEach(btn => {
+    btn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleTrackDisabled(Number(event.currentTarget.dataset.track));
+    });
+  });
+  document.querySelectorAll('[data-action="toggle-track-solo"]').forEach(btn => {
+    btn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleTrackSolo(Number(event.currentTarget.dataset.track));
     });
   });
 
@@ -544,25 +771,32 @@ function bindTimelineInteractions() {
       const onClipMove = moveEvent => {
         const delta = (moveEvent.clientX - startX) / pxPerSec;
         if (action === 'trim-left') {
-          const maxStart = original.timelineStart + original.duration - 0.1;
-          const newStart = clamp(snapTime(original.timelineStart + delta), 0, maxStart);
+          const sourceEnd = original.sourceStart + original.duration;
+          const mediaLeftLimit = original.timelineStart - original.sourceStart;
+          const maxStart = original.timelineStart + original.duration - minClipDuration;
+          const minStart = Math.max(mediaLeftLimit, minStartOnTrack(original));
+          const newStart = clamp(snapTime(original.timelineStart + delta), minStart, maxStart);
           const consumed = newStart - original.timelineStart;
           Object.assign(clip, {
             timelineStart: newStart,
-            sourceStart: Math.max(0, original.sourceStart + consumed),
-            duration: Math.max(0.1, original.duration - consumed)
+            sourceStart: clamp(original.sourceStart + consumed, 0, sourceEnd - minClipDuration),
+            duration: Math.max(minClipDuration, sourceEnd - clamp(original.sourceStart + consumed, 0, sourceEnd - minClipDuration))
           });
         } else if (action === 'trim-right') {
-          clip.duration = Math.max(0.1, snapTime(original.duration + delta));
+          const nextEnd = maxEndOnTrack(original);
+          const mediaMax = mediaDurationForClip(original) - original.sourceStart;
+          const overlapMax = nextEnd === Infinity ? mediaMax : nextEnd - original.timelineStart;
+          clip.duration = clamp(snapTime(original.duration + delta), minClipDuration, Math.max(minClipDuration, Math.min(mediaMax, overlapMax)));
         } else {
-          clip.timelineStart = Math.max(0, snapTime(original.timelineStart + delta));
           const newTrack = trackIndexFromClientY(moveEvent.clientY);
           if (newTrack != null) {
             clip.trackIndex = newTrack;
             clip.lane = newTrack;
           }
+          clip.timelineStart = availableStartOnTrack(clip.id, clip.trackIndex, original.timelineStart + delta, clip.duration);
         }
         positionClipElement(el, clip);
+        drawTimelineWaveforms();
         $('playhead').style.left = (labelWidth + playheadTime * pxPerSec) + 'px';
       };
       const onClipUp = () => {
@@ -612,7 +846,7 @@ function trackElementFromClientY(clientY) {
 
 function activeClipsAt(time) {
   return project.clips
-    .filter(clip => clip.enabled !== false && time >= clip.timelineStart && time < clip.timelineStart + clip.duration)
+    .filter(clip => clip.enabled !== false && isTrackActive(clip.trackIndex) && time >= clip.timelineStart && time < clip.timelineStart + clip.duration)
     .sort((a, b) => b.trackIndex - a.trackIndex);
 }
 
@@ -693,6 +927,7 @@ function stopPreview() {
 function seekPreview(time) {
   playheadTime = Math.min(Math.max(0, time), projectDuration());
   $('playhead').style.left = (labelWidth + playheadTime * pxPerSec) + 'px';
+  keepPlayheadInView(false);
   syncPreview();
 }
 
@@ -707,9 +942,24 @@ function tickPreview(now) {
   }
   $('playhead').style.left = (labelWidth + playheadTime * pxPerSec) + 'px';
   renderTransport();
+  keepPlayheadInView(true);
   const active = activeClipsAt(playheadTime);
   if (!active.length || Math.abs(delta) > 0.25) syncPreview();
   rafId = requestAnimationFrame(tickPreview);
+}
+
+function keepPlayheadInView(smooth) {
+  const scroll = $('timelineScroll');
+  if (!scroll) return;
+  const playheadX = labelWidth + playheadTime * pxPerSec;
+  const leftEdge = scroll.scrollLeft + labelWidth;
+  const rightEdge = scroll.scrollLeft + scroll.clientWidth - 120;
+  if (playheadX < leftEdge || playheadX > rightEdge) {
+    scroll.scrollTo({
+      left: Math.max(0, playheadX - Math.floor(scroll.clientWidth * 0.35)),
+      behavior: smooth ? 'smooth' : 'auto',
+    });
+  }
 }
 
 function renderTransport() {
@@ -721,8 +971,8 @@ function renderTransport() {
 function fitTimeline(shouldRender = true) {
   const scroll = $('timelineScroll');
   const available = Math.max(320, (scroll ? scroll.clientWidth : window.innerWidth) - labelWidth - 120);
-  const next = Math.max(1, Math.min(90, available / Math.max(1, projectDuration())));
-  pxPerSec = Math.round(next * 10) / 10;
+  const next = Math.min(120, available / Math.max(1, projectDuration()));
+  pxPerSec = Math.round(clampZoom(next) * 100) / 100;
   if ($('zoomSlider')) $('zoomSlider').value = String(pxPerSec);
   if (shouldRender) renderTimeline();
 }
@@ -732,7 +982,7 @@ async function probeProjectMedia() {
   let changed = false;
   for (const asset of assets) {
     changed = await probeAssetMetadata(asset) || changed;
-    if (asset.hasAudio !== false && !Array.isArray(asset.waveform)) {
+    if (asset.hasAudio !== false && (!Array.isArray(asset.waveform) || asset.waveform.length < 256)) {
       const waveform = await computeWaveform(asset);
       if (waveform.length) {
         asset.waveform = waveform;
@@ -740,6 +990,9 @@ async function probeProjectMedia() {
       }
     }
   }
+  const before = JSON.stringify(project.clips.map(clip => [clip.id, clip.timelineStart, clip.sourceStart, clip.duration, clip.trackIndex]));
+  repairTimelineConstraints();
+  changed = changed || before !== JSON.stringify(project.clips.map(clip => [clip.id, clip.timelineStart, clip.sourceStart, clip.duration, clip.trackIndex]));
   if (changed) {
     render();
     await saveProject();
@@ -791,7 +1044,8 @@ async function computeWaveform(asset) {
     const audioContext = new AudioContextClass();
     const buffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
     const channel = buffer.getChannelData(0);
-    const bucket = Math.max(1, Math.floor(channel.length / 56));
+    const targetPoints = 1024;
+    const bucket = Math.max(1, Math.floor(channel.length / targetPoints));
     const peaks = [];
     for (let i = 0; i < channel.length; i += bucket) {
       let max = 0;
@@ -801,7 +1055,7 @@ async function computeWaveform(asset) {
         if (v > max) max = v;
       }
       peaks.push(+max.toFixed(3));
-      if (peaks.length >= 56) break;
+      if (peaks.length >= targetPoints) break;
     }
     if (audioContext.close) audioContext.close();
     return peaks;
@@ -882,24 +1136,24 @@ function bindChrome() {
   };
   $('exportProjectBtn').onclick = exportProjectJson;
   $('saveBtn').onclick = saveProject;
-  $('reviewBtn').onclick = () => { location.href = '/'; };
-  $('staleBtn').onclick = markNeedsTranscript;
+  $('reviewBtn').onclick = () => { if (reviewReady) location.href = '/review.html'; };
+  $('staleBtn').onclick = () => markNeedsTranscript().catch(err => setStatus('标记失败: ' + err.message));
   $('deleteClipBtn').onclick = deleteSelectedClip;
   $('playBtn').onclick = () => isPlaying ? pausePreview() : playPreview();
   $('stopBtn').onclick = stopPreview;
   $('jumpStartBtn').onclick = () => seekPreview(0);
   $('zoomSlider').oninput = event => {
-    pxPerSec = Number(event.target.value);
+    pxPerSec = clampZoom(Number(event.target.value));
     renderTimeline();
   };
   $('zoomOutBtn').onclick = () => {
-    pxPerSec = Math.max(1, pxPerSec - 8);
-    $('zoomSlider').value = pxPerSec;
+    pxPerSec = clampZoom(pxPerSec * 0.72);
+    $('zoomSlider').value = String(pxPerSec);
     renderTimeline();
   };
   $('zoomInBtn').onclick = () => {
-    pxPerSec = Math.min(90, pxPerSec + 8);
-    $('zoomSlider').value = pxPerSec;
+    pxPerSec = clampZoom(pxPerSec * 1.28);
+    $('zoomSlider').value = String(pxPerSec);
     renderTimeline();
   };
   $('fitTimelineBtn').onclick = () => fitTimeline(true);
@@ -915,15 +1169,18 @@ function bindChrome() {
   };
   bindMediaBinDrop();
   bindPanelResizers();
-  document.addEventListener('keydown', event => {
+  window.addEventListener('keydown', event => {
     if (event.target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName)) return;
     if (event.code === 'Space') { event.preventDefault(); isPlaying ? pausePreview() : playPreview(); }
     if (event.key === 'v') setTool('select');
     if (event.key === 'c') setTool('razor');
-    if (event.key === 'Backspace' || event.key === 'Delete') deleteSelectedClip();
-    if (event.key === '+') { pxPerSec = Math.min(90, pxPerSec + 4); $('zoomSlider').value = pxPerSec; renderTimeline(); }
-    if (event.key === '-') { pxPerSec = Math.max(1, pxPerSec - 4); $('zoomSlider').value = pxPerSec; renderTimeline(); }
-  });
+    if (event.key === 'Backspace' || event.key === 'Delete') {
+      event.preventDefault();
+      deleteSelectedClip();
+    }
+    if (event.key === '+') { pxPerSec = clampZoom(pxPerSec * 1.18); $('zoomSlider').value = String(pxPerSec); renderTimeline(); }
+    if (event.key === '-') { pxPerSec = clampZoom(pxPerSec * 0.82); $('zoomSlider').value = String(pxPerSec); renderTimeline(); }
+  }, true);
 }
 
 function setTool(tool) {

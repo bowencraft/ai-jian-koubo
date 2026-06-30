@@ -49,6 +49,7 @@ function buildTimelineSnapshot(rawProject, projectDir) {
     name: normalized.name,
     savedAt: new Date().toISOString(),
     trackCount: normalized.timeline.trackCount,
+    tracks: normalized.timeline.tracks,
     assets: normalized.assets.map(asset => ({
       id: asset.id,
       name: asset.name,

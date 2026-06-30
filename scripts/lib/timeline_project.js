@@ -30,7 +30,7 @@ function normalizeProject(project) {
     if (Array.isArray(asset.waveform)) {
       normalized.waveform = asset.waveform
         .map(value => Math.max(0, Math.min(1, numeric(value, 0))))
-        .slice(0, 80);
+        .slice(0, 1024);
     }
     assetById.set(id, normalized);
     return normalized;
@@ -62,6 +62,14 @@ function normalizeProject(project) {
     Math.floor(numeric(p.timeline && p.timeline.trackCount, 4)),
     normalizedClips.reduce((max, clip) => Math.max(max, clip.trackIndex + 1), 0)
   );
+  const sourceTracks = Array.isArray(p.timeline && p.timeline.tracks) ? p.timeline.tracks : [];
+  const tracks = Array.from({ length: trackCount }, (_, index) => {
+    const track = sourceTracks[index] && typeof sourceTracks[index] === 'object' ? sourceTracks[index] : {};
+    return {
+      disabled: track.disabled === true,
+      solo: track.solo === true,
+    };
+  });
 
   const normalizedProject = {
     version: p.version || 1,
@@ -71,6 +79,7 @@ function normalizeProject(project) {
     timeline: {
       ...(p.timeline && typeof p.timeline === 'object' ? p.timeline : {}),
       trackCount,
+      tracks,
     },
   };
   if (p.transcript && typeof p.transcript === 'object') normalizedProject.transcript = p.transcript;
@@ -131,9 +140,11 @@ function applyTimelineDeletes(project, deleteRanges) {
   const normalized = normalizeProject(project);
   const ranges = Array.isArray(deleteRanges) ? deleteRanges : [];
   const assetById = new Map(normalized.assets.map(asset => [asset.id, asset]));
+  const tracks = normalized.timeline && Array.isArray(normalized.timeline.tracks) ? normalized.timeline.tracks : [];
   const finalClips = [];
 
   normalized.clips.filter(clip => clip.enabled).forEach((clip) => {
+    if (tracks[clip.trackIndex] && tracks[clip.trackIndex].disabled) return;
     const timelineEnd = clip.timelineStart + clip.duration;
     subtractRanges(clip.timelineStart, timelineEnd, ranges).forEach((piece, pieceIndex) => {
       const sourceStart = clip.sourceStart + (piece.start - clip.timelineStart);
