@@ -13,6 +13,7 @@ let currentTool = 'select';
 let pendingMetadataProbe = null;
 let reviewReady = false;
 let waveformDrawRaf = null;
+let lastPreviewSignature = '';
 
 const labelWidth = 112;
 const trackHeight = 76;
@@ -235,6 +236,7 @@ async function uploadFiles(files) {
   const list = Array.from(files || []);
   if (!list.length) return;
   setStatus(`上传 ${list.length} 个素材...`);
+  let reusedCount = 0;
   for (const file of list) {
     const kind = inferKindFromFile(file);
     const res = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}&kind=${encodeURIComponent(kind)}`, {
@@ -247,10 +249,12 @@ async function uploadFiles(files) {
     if (data.project) normalizeClientProject(data.project);
     if (typeof data.reviewReady === 'boolean') reviewReady = data.reviewReady;
     if (data.asset && data.asset.id) selectedAssetId = data.asset.id;
+    if (data.reused) reusedCount++;
   }
   render();
-  setStatus('正在读取素材时长和波形...');
+  setStatus(reusedCount ? `已跳过 ${reusedCount} 个重复素材，正在读取素材时长和波形...` : '正在读取素材时长和波形...');
   await probeProjectMedia();
+  if (reusedCount) setStatus(`已复用 ${reusedCount} 个已有素材`);
   setDirty(false);
 }
 
@@ -969,16 +973,43 @@ function mediaUrl(assetId) {
   return '/media/' + encodeURIComponent(assetId);
 }
 
-function ensureHiddenPlayer(asset) {
-  if (hiddenPlayers.has(asset.id)) return hiddenPlayers.get(asset.id);
+function hiddenPlayerKeyForClip(clip) {
+  return String(clip && (clip.id || `${clip.assetId}:${clip.trackIndex}:${clip.timelineStart}`));
+}
+
+function ensureHiddenPlayer(clip, asset) {
+  const key = hiddenPlayerKeyForClip(clip);
+  if (hiddenPlayers.has(key)) return hiddenPlayers.get(key);
   const media = document.createElement(asset.kind === 'video' || asset.hasVideo ? 'video' : 'audio');
   media.src = mediaUrl(asset.id);
   media.preload = 'auto';
   media.playsInline = true;
   media.style.display = 'none';
   document.body.appendChild(media);
-  hiddenPlayers.set(asset.id, media);
+  hiddenPlayers.set(key, media);
   return media;
+}
+
+function cleanupHiddenPlayers() {
+  const validKeys = new Set(project.clips.map(hiddenPlayerKeyForClip));
+  hiddenPlayers.forEach((player, key) => {
+    if (validKeys.has(key)) return;
+    player.pause();
+    player.remove();
+    hiddenPlayers.delete(key);
+  });
+}
+
+function previewSignature(active, topVideoClip, assets = assetById()) {
+  return [
+    topVideoClip ? topVideoClip.id : '',
+    ...active
+      .filter(clip => {
+        const asset = assets.get(clip.assetId);
+        return asset && asset.hasAudio !== false;
+      })
+      .map(clip => hiddenPlayerKeyForClip(clip)),
+  ].join('|');
 }
 
 function syncPreview() {
@@ -1005,15 +1036,17 @@ function syncPreview() {
     $('viewerEmpty').style.display = 'block';
   }
 
+  cleanupHiddenPlayers();
   hiddenPlayers.forEach(player => player.pause());
   active.forEach(clip => {
     const asset = assets.get(clip.assetId);
     if (!asset || asset.hasAudio === false) return;
-    if (topVideoClip && clip.assetId === topVideoClip.assetId) return;
-    const player = ensureHiddenPlayer(asset);
+    if (topVideoClip && clip.id === topVideoClip.id) return;
+    const player = ensureHiddenPlayer(clip, asset);
     player.currentTime = clip.sourceStart + (playheadTime - clip.timelineStart);
     if (isPlaying) player.play().catch(() => {});
   });
+  lastPreviewSignature = previewSignature(active, topVideoClip, assets);
   renderTransport();
 }
 
@@ -1059,7 +1092,12 @@ function tickPreview(now) {
   renderTransport();
   keepPlayheadInView(true);
   const active = activeClipsAt(playheadTime);
-  if (!active.length || Math.abs(delta) > 0.25) syncPreview();
+  const assets = assetById();
+  const topVideoClip = active.find(clip => {
+    const asset = assets.get(clip.assetId);
+    return asset && (asset.kind === 'video' || asset.hasVideo);
+  });
+  if (!active.length || Math.abs(delta) > 0.25 || previewSignature(active, topVideoClip, assets) !== lastPreviewSignature) syncPreview();
   rafId = requestAnimationFrame(tickPreview);
 }
 

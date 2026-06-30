@@ -16,6 +16,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { buildFcpxml, buildTimelineFcpxml } = require('./lib/fcpxml');
 const { createLegacyProject, normalizeProject, stripProjectWaveforms } = require('./lib/timeline_project');
+const { hashBuffer, findDuplicateAsset } = require('./lib/asset_dedupe');
 
 const PORT = process.argv[2] || 8899;
 const VIDEO_FILE = process.argv[3];
@@ -283,24 +284,50 @@ const server = http.createServer((req, res) => {
     const parsedUrl = new URL(req.url, `http://localhost:${PORT}`);
     const originalName = safeFileName(parsedUrl.searchParams.get('name') || 'media');
     const kind = parsedUrl.searchParams.get('kind') || inferKind(originalName);
-    const mediaDir = path.resolve('media');
-    fs.mkdirSync(mediaDir, { recursive: true });
-    let fileName = originalName;
-    let outputPath = path.join(mediaDir, fileName);
-    const ext = path.extname(originalName);
-    const stem = path.basename(originalName, ext);
-    let n = 1;
-    while (fs.existsSync(outputPath)) {
-      fileName = `${stem}_${n}${ext}`;
-      outputPath = path.join(mediaDir, fileName);
-      n++;
-    }
 
     const chunks = [];
     req.on('data', chunk => chunks.push(chunk));
     req.on('end', () => {
       try {
-        fs.writeFileSync(outputPath, Buffer.concat(chunks));
+        const buffer = Buffer.concat(chunks);
+        const contentHash = hashBuffer(buffer);
+        const fileSize = buffer.length;
+        const currentProject = readProject();
+        const duplicate = findDuplicateAsset(currentProject, {
+          originalName,
+          fileSize,
+          contentHash,
+        }, resolveMediaPath);
+
+        if (duplicate) {
+          timelineProject = writeProject({
+            ...currentProject,
+            assets: currentProject.assets.map(asset => (
+              asset.id === duplicate.id
+                ? { ...asset, originalName: asset.originalName || originalName, fileSize, contentHash }
+                : asset
+            )),
+          });
+          const existingAsset = timelineProject.assets.find(asset => asset.id === duplicate.id) || duplicate;
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, reused: true, asset: existingAsset, project: timelineProject, reviewReady: reviewReady() }));
+          return;
+        }
+
+        const mediaDir = path.resolve('media');
+        fs.mkdirSync(mediaDir, { recursive: true });
+        let fileName = originalName;
+        let outputPath = path.join(mediaDir, fileName);
+        const ext = path.extname(originalName);
+        const stem = path.basename(originalName, ext);
+        let n = 1;
+        while (fs.existsSync(outputPath)) {
+          fileName = `${stem}_${n}${ext}`;
+          outputPath = path.join(mediaDir, fileName);
+          n++;
+        }
+
+        fs.writeFileSync(outputPath, buffer);
         const asset = {
           id: crypto.randomUUID ? crypto.randomUUID() : `asset-${Date.now()}`,
           name: path.basename(fileName, path.extname(fileName)),
@@ -309,8 +336,11 @@ const server = http.createServer((req, res) => {
           hasAudio: true,
           hasVideo: kind === 'video',
           duration: 0,
+          originalName,
+          fileSize,
+          contentHash,
+          uploadedAt: new Date().toISOString(),
         };
-        const currentProject = readProject();
         timelineProject = writeProject({
           ...currentProject,
           assets: currentProject.assets.concat(asset),

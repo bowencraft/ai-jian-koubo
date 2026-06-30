@@ -114,6 +114,7 @@ cp "$SCRIPT_DIR/lib/compute_keeps.js" "$PACKAGE_DIR/server/lib/compute_keeps.js"
 cp "$SCRIPT_DIR/lib/fcpxml.js" "$PACKAGE_DIR/server/lib/fcpxml.js"
 cp "$SCRIPT_DIR/lib/refine_boundaries.js" "$PACKAGE_DIR/server/lib/refine_boundaries.js"
 cp "$SCRIPT_DIR/lib/timeline_project.js" "$PACKAGE_DIR/server/lib/timeline_project.js"
+cp "$SCRIPT_DIR/lib/asset_dedupe.js" "$PACKAGE_DIR/server/lib/asset_dedupe.js"
 
 cat > "$PACKAGE_DIR/start.sh" <<'EOF'
 #!/bin/bash

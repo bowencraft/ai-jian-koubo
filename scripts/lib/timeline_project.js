@@ -29,6 +29,10 @@ function normalizeProject(project) {
       hasVideo: asset.hasVideo != null ? !!asset.hasVideo : kind !== 'audio',
       duration: numeric(asset.duration, 0),
     };
+    if (asset.originalName) normalized.originalName = String(asset.originalName);
+    if (Number.isFinite(Number(asset.fileSize))) normalized.fileSize = Number(asset.fileSize);
+    if (asset.contentHash) normalized.contentHash = String(asset.contentHash);
+    if (asset.uploadedAt) normalized.uploadedAt = String(asset.uploadedAt);
     if (Array.isArray(asset.waveform)) {
       normalized.waveform = asset.waveform
         .map(value => Math.max(0, Math.min(1, numeric(value, 0))))
