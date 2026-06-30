@@ -16,6 +16,7 @@
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --bin-w: 360px;
   --top-h: 55vh;
+  --inspector-w: 232px;
 }
 * { box-sizing: border-box; }
 body {
@@ -172,7 +173,7 @@ label {
 .timeline-panel {
   grid-area: timeline;
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: var(--inspector-w) minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }

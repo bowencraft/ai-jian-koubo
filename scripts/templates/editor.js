@@ -12,6 +12,7 @@ let snapEnabled = true;
 let currentTool = 'select';
 let pendingMetadataProbe = null;
 let reviewReady = false;
+let waveformDrawRaf = null;
 
 const labelWidth = 112;
 const trackHeight = 76;
@@ -738,16 +739,53 @@ const WaveformRenderer = {
 
 function drawTimelineWaveforms() {
   const assets = assetById();
+  const scroll = $('timelineScroll');
+  const viewportStart = scroll ? scroll.scrollLeft + labelWidth : 0;
+  const viewportEnd = scroll ? scroll.scrollLeft + scroll.clientWidth : Infinity;
   document.querySelectorAll('canvas.clip-waveform').forEach(canvas => {
     const clip = project.clips.find(item => item.id === canvas.dataset.clipId);
     const asset = clip ? assets.get(clip.assetId) : null;
     if (!clip || !asset) return;
-    WaveformRenderer.draw(canvas, asset.waveform, clip, num(asset.duration, clip.duration));
+    const clipLeft = labelWidth + num(clip.timelineStart) * pxPerSec;
+    const clipWidth = Math.max(24, num(clip.duration) * pxPerSec);
+    const visibleStart = Math.max(clipLeft, viewportStart);
+    const visibleEnd = Math.min(clipLeft + clipWidth, viewportEnd);
+    const visibleWidth = Math.max(0, Math.ceil(visibleEnd - visibleStart));
+
+    if (visibleWidth <= 0) {
+      canvas.style.display = 'none';
+      return;
+    }
+
+    const visibleOffsetPx = visibleStart - clipLeft;
+    const visibleOffsetSec = Math.max(0, visibleOffsetPx / pxPerSec);
+    const visibleDuration = Math.min(
+      Math.max(0.001, visibleWidth / pxPerSec),
+      Math.max(0.001, num(clip.duration) - visibleOffsetSec)
+    );
+    canvas.style.display = 'block';
+    canvas.style.left = Math.max(0, visibleOffsetPx) + 'px';
+    canvas.style.right = 'auto';
+    canvas.style.width = visibleWidth + 'px';
+    WaveformRenderer.draw(canvas, asset.waveform, {
+      ...clip,
+      sourceStart: num(clip.sourceStart) + visibleOffsetSec,
+      duration: visibleDuration,
+    }, num(asset.duration, clip.duration));
+  });
+}
+
+function scheduleTimelineWaveformDraw() {
+  if (waveformDrawRaf) return;
+  waveformDrawRaf = requestAnimationFrame(() => {
+    waveformDrawRaf = null;
+    drawTimelineWaveforms();
   });
 }
 
 function bindTimelineInteractions() {
   const timelineScroll = $('timelineScroll');
+  timelineScroll.onscroll = scheduleTimelineWaveformDraw;
   timelineScroll.onpointerdown = event => {
     if (event.button !== 0) return;
     if (event.target.closest('.clip, .handle, button, input, textarea, select, .track-label')) return;
