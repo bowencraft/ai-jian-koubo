@@ -5,6 +5,7 @@
  * 功能：
  * 1. 提供静态文件服务（review.html, audio.mp3）
  * 2. POST /api/fcpxml - 接收删除列表，导出 FCPXML 工程文件（可导入剪映 / Final Cut Pro）
+ * 3. POST /api/audio /api/srt - 导出按审核结果剪好的 MP3 音频和 SRT 字幕
  *
  * 用法: node review_server.js [port] [video_file]
  * video_file 可选：没有转录/审核数据时，服务会把根路径指向 editor.html，作为项目启动器。
@@ -14,7 +15,15 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 const { buildFcpxml, buildTimelineFcpxml } = require('./lib/fcpxml');
+const { computeFinalKeeps } = require('./lib/compute_keeps');
+const {
+  buildEditedSrt,
+  normalizeBitrate,
+  runEditedAudioExport,
+  totalKeepDuration,
+} = require('./lib/review_exports');
 const { createLegacyProject, normalizeProject, stripProjectWaveforms } = require('./lib/timeline_project');
 const { hashBuffer, findDuplicateAsset } = require('./lib/asset_dedupe');
 
@@ -150,6 +159,8 @@ const projectSignature = crypto
   }))
   .digest('hex');
 
+const exportJobs = new Map();
+
 const MIME_TYPES = {
   '.html': 'text/html',
   '.js': 'application/javascript',
@@ -181,6 +192,74 @@ function toProjectRelative(filePath) {
 function resolveMediaPath(filePath) {
   if (!filePath) return '';
   return path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
+}
+
+function getExportBaseName() {
+  if (timelineProject && timelineProject.name) return safeFileName(timelineProject.name);
+  if (VIDEO_FILE) return safeFileName(path.basename(VIDEO_FILE, path.extname(VIDEO_FILE)));
+  return safeFileName(path.basename(process.cwd()) || 'review');
+}
+
+function parseExportPayload(body) {
+  const parsed = JSON.parse(body || '{}');
+  return {
+    parsed,
+    deleteList: Array.isArray(parsed) ? parsed : (parsed.deleteList || []),
+    cutOpts: (parsed && !Array.isArray(parsed) && parsed.opts) ? parsed.opts : undefined,
+    finalSelected: (parsed && !Array.isArray(parsed) && Array.isArray(parsed.finalSelected)) ? parsed.finalSelected : null,
+  };
+}
+
+function getReviewAudioDuration() {
+  let duration = reviewDuration;
+  try {
+    const probed = parseFloat(execFileSync('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'csv=p=0',
+      path.resolve('audio.mp3'),
+    ]).toString().trim());
+    if (Number.isFinite(probed) && probed > 0) duration = probed;
+  } catch (err) {
+    if (!duration) throw err;
+  }
+  return duration;
+}
+
+function computeReviewKeeps(deleteList, cutOpts) {
+  const duration = getReviewAudioDuration();
+  return {
+    duration,
+    finalKeeps: computeFinalKeeps(deleteList || [], silencePeriods || [], duration, cutOpts || {}),
+  };
+}
+
+function publicExportJob(job) {
+  const elapsedSeconds = Math.max(0, (Date.now() - job.startedAt) / 1000);
+  const etaSeconds = job.status === 'running' && job.progress > 0.01
+    ? Math.max(0, elapsedSeconds * (1 - job.progress) / job.progress)
+    : null;
+  return {
+    id: job.id,
+    type: job.type,
+    status: job.status,
+    progress: Math.max(0, Math.min(1, job.progress || 0)),
+    outTime: job.outTime || 0,
+    duration: job.duration || 0,
+    etaSeconds,
+    elapsedSeconds,
+    output: job.output,
+    segments: job.segments,
+    bitrate: job.bitrate,
+    error: job.error || null,
+    fileSize: job.fileSize || null,
+  };
+}
+
+function rememberExportJob(job) {
+  exportJobs.set(job.id, job);
+  const timer = setTimeout(() => exportJobs.delete(job.id), 60 * 60 * 1000);
+  if (timer.unref) timer.unref();
 }
 
 function streamFile(req, res, filePath, contentType) {
@@ -375,10 +454,7 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         // 兼容两种请求体：旧版直接传删除段数组；新版传 { deleteList, opts }
-        const parsed = JSON.parse(body);
-        const deleteList = Array.isArray(parsed) ? parsed : (parsed.deleteList || []);
-        const cutOpts = (parsed && !Array.isArray(parsed) && parsed.opts) ? parsed.opts : undefined;
-        const finalSelected = (parsed && !Array.isArray(parsed) && Array.isArray(parsed.finalSelected)) ? parsed.finalSelected : null;
+        const { deleteList, cutOpts, finalSelected } = parseExportPayload(body);
 
         // FCPXML 生成（含 ffprobe 探测 + 切割算法）抽到 lib/fcpxml.js，便于单测。
         // 有 project.json 时导出原始多轨素材；没有/失败时保持旧单素材导出。
@@ -460,6 +536,126 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ success: true, output: outputFcpxml, segments: finalKeeps.length }));
       } catch (err) {
         console.error('❌ FCPXML 导出失败:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // API: 导出按审核结果剪好的音频
+  if (req.method === 'POST' && req.url === '/api/audio') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { parsed, deleteList, cutOpts } = parseExportPayload(body);
+        const bitrate = normalizeBitrate(parsed.bitrate || '128k');
+        const sourceAudio = path.resolve('audio.mp3');
+        if (!fs.existsSync(sourceAudio)) {
+          throw new Error('找不到 audio.mp3，请先生成审核数据');
+        }
+
+        const { finalKeeps } = computeReviewKeeps(deleteList, cutOpts);
+        const baseName = getExportBaseName();
+        const outputPath = path.resolve(`${baseName}_cut_${bitrate}.mp3`);
+        if (!finalKeeps.length) {
+          throw new Error('没有可导出的音频片段');
+        }
+
+        const job = {
+          id: crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'),
+          type: 'audio',
+          status: 'running',
+          progress: 0,
+          outTime: 0,
+          duration: totalKeepDuration(finalKeeps),
+          output: outputPath,
+          segments: finalKeeps.length,
+          bitrate,
+          startedAt: Date.now(),
+        };
+        rememberExportJob(job);
+
+        runEditedAudioExport({
+          sourceAudio,
+          outputPath,
+          finalKeeps,
+          bitrate,
+          onProgress: (progress) => {
+            job.progress = progress.progress;
+            job.outTime = progress.outTime;
+          },
+        }).then((rendered) => {
+          job.status = 'done';
+          job.progress = 1;
+          job.outTime = rendered.duration || job.duration;
+          job.fileSize = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : null;
+          console.log(`✅ 导出音频: ${rendered.outputPath} (${rendered.segments} 片段 / ${rendered.bitrate})`);
+        }).catch((err) => {
+          job.status = 'error';
+          job.error = err.message;
+          console.error('❌ 音频导出失败:', err.message);
+        });
+
+        console.log(`🎧 开始导出音频: ${outputPath} (${job.segments} 片段 / ${job.bitrate})`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          jobId: job.id,
+          job: publicExportJob(job),
+          output: job.output,
+          segments: job.segments,
+          bitrate: job.bitrate,
+        }));
+      } catch (err) {
+        console.error('❌ 音频导出失败:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // API: 查询导出任务进度
+  if (req.method === 'GET' && req.url.startsWith('/api/export-progress/')) {
+    const jobId = decodeURIComponent(req.url.replace('/api/export-progress/', '').split('?')[0]);
+    const job = exportJobs.get(jobId);
+    if (!job) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: '导出任务不存在或已过期' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, job: publicExportJob(job) }));
+    return;
+  }
+
+  // API: 导出按审核结果重排时间轴的 SRT
+  if (req.method === 'POST' && req.url === '/api/srt') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { deleteList, cutOpts } = parseExportPayload(body);
+        const { finalKeeps } = computeReviewKeeps(deleteList, cutOpts);
+        const { srt, cues } = buildEditedSrt({ words: reviewWords, finalKeeps });
+        if (!cues.length) {
+          throw new Error('没有可导出的字幕内容');
+        }
+
+        const outputPath = path.resolve(`${getExportBaseName()}_cut.srt`);
+        fs.writeFileSync(outputPath, srt, 'utf8');
+        console.log(`✅ 导出 SRT: ${outputPath} (${cues.length} 条字幕)`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          output: outputPath,
+          cues: cues.length,
+          segments: finalKeeps.length,
+        }));
+      } catch (err) {
+        console.error('❌ SRT 导出失败:', err.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: err.message }));
       }

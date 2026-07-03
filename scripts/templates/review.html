@@ -74,7 +74,17 @@
       <button class="ghost" onclick="exportDraft()" title="把当前进度下载为 JSON 文件">导出进度</button>
       <button class="ghost" onclick="document.getElementById('draftImport').click()" title="导入之前导出的进度 JSON">导入进度</button>
       <input id="draftImport" type="file" accept="application/json,.json" style="display:none" onchange="importDraftFile(event)">
-      <button class="primary" onclick="exportFCPXML()">导出 FCPXML</button>
+      <div class="export-menu" id="exportMenu">
+        <button class="primary export-trigger" onclick="toggleExportMenu(event)" aria-haspopup="true" aria-expanded="false">导出为...</button>
+        <div class="export-options" role="menu" aria-label="导出选项">
+          <button onclick="exportFCPXML()" role="menuitem">FCPXML</button>
+          <button onclick="exportEditedAudio('96k')" role="menuitem">音频 MP3 96 kbps</button>
+          <button onclick="exportEditedAudio('128k')" role="menuitem">音频 MP3 128 kbps</button>
+          <button onclick="exportEditedAudio('192k')" role="menuitem">音频 MP3 192 kbps</button>
+          <button onclick="exportEditedAudio('256k')" role="menuitem">音频 MP3 256 kbps</button>
+          <button onclick="exportSRT()" role="menuitem">SRT 字幕</button>
+        </div>
+      </div>
       <div class="tb-sep"></div>
       <button class="danger" onclick="clearAll()" title="清空选择">清空</button>
     </div>

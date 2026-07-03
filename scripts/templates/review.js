@@ -1056,35 +1056,165 @@ let words = [];
       render();
     }
 
+    function closeExportMenu() {
+      const menu = document.getElementById('exportMenu');
+      if (!menu) return;
+      menu.classList.remove('open');
+      const trigger = menu.querySelector('.export-trigger');
+      if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleExportMenu(event) {
+      if (event) event.stopPropagation();
+      const menu = document.getElementById('exportMenu');
+      if (!menu) return;
+      const open = !menu.classList.contains('open');
+      menu.classList.toggle('open', open);
+      const trigger = menu.querySelector('.export-trigger');
+      if (trigger) trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    document.addEventListener('click', e => {
+      const menu = document.getElementById('exportMenu');
+      if (menu && !menu.contains(e.target)) closeExportMenu();
+    });
+
+    function buildExportPayload(extra) {
+      return {
+        deleteList: getDeleteSegments(),
+        opts: cutOpts,
+        finalSelected: getSelectedIdx(),
+        ...(extra || {})
+      };
+    }
+
+    async function downloadOutput(output) {
+      const fileName = String(output || '').split(/[\\/]/).pop() || 'export';
+      const dlRes = await fetch('/api/download/' + encodeURIComponent(output));
+      if (!dlRes.ok) throw new Error('下载文件失败');
+      const blob = await dlRes.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(url);
+      return fileName;
+    }
+
+    async function postExport(endpoint, payload) {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || '导出失败');
+      return data;
+    }
+
+    function formatDuration(seconds) {
+      if (!Number.isFinite(Number(seconds))) return '--:--';
+      const s = Math.max(0, Math.round(Number(seconds)));
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      return h > 0
+        ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+        : `${m}:${String(sec).padStart(2, '0')}`;
+    }
+
+    let exportProgressEl = null;
+    function ensureExportProgressEl() {
+      if (exportProgressEl) return exportProgressEl;
+      const el = document.createElement('div');
+      el.className = 'export-progress';
+      el.innerHTML = `
+        <div class="export-progress-card">
+          <div class="export-progress-title" data-role="title">正在导出</div>
+          <div class="export-progress-track"><div class="export-progress-bar" data-role="bar"></div></div>
+          <div class="export-progress-meta">
+            <span data-role="percent">0%</span>
+            <span data-role="eta">剩余时间估算中</span>
+          </div>
+        </div>`;
+      document.body.appendChild(el);
+      exportProgressEl = el;
+      return el;
+    }
+
+    function updateExportProgress(job, title) {
+      const el = ensureExportProgressEl();
+      el.classList.add('show');
+      const progress = Math.max(0, Math.min(1, Number(job && job.progress) || 0));
+      const percent = Math.round(progress * 100);
+      el.querySelector('[data-role="title"]').textContent = title || '正在导出音频';
+      el.querySelector('[data-role="bar"]').style.width = `${percent}%`;
+      el.querySelector('[data-role="percent"]').textContent =
+        `${percent}% · ${formatDuration(job && job.outTime)} / ${formatDuration(job && job.duration)}`;
+      const eta = job && Number.isFinite(Number(job.etaSeconds))
+        ? `预计剩余 ${formatDuration(job.etaSeconds)}`
+        : '剩余时间估算中';
+      el.querySelector('[data-role="eta"]').textContent = eta;
+    }
+
+    function hideExportProgress() {
+      if (exportProgressEl) exportProgressEl.classList.remove('show');
+    }
+
+    async function waitForExportJob(jobId, title) {
+      while (true) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const res = await fetch('/api/export-progress/' + encodeURIComponent(jobId));
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || '导出任务查询失败');
+        const job = data.job;
+        updateExportProgress(job, title);
+        if (job.status === 'done') return job;
+        if (job.status === 'error') throw new Error(job.error || '导出失败');
+      }
+    }
+
     async function exportFCPXML() {
+      closeExportMenu();
       const segments = getDeleteSegments();
       if (!segments.length) { alert('没有选中任何片段'); return; }
-      // 把「你最终选中的词级 idx」一并送给服务器，供自进化学习写 review_log.json。
-      // selected 里是 'word-<idx>'，提取数字、升序；服务器再 diff AI 初选 vs 你最终。
-      const finalSelected = getSelectedIdx();
       try {
-        const res = await fetch('/api/fcpxml', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ deleteList: segments, opts: cutOpts, finalSelected })
-        });
-        const data = await res.json();
-        if (data.success) {
-          const fileName = data.output.split('/').pop();
-          const dlRes = await fetch('/api/download/' + encodeURIComponent(data.output));
-          const blob = await dlRes.blob();
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = fileName;
-          a.click();
-          URL.revokeObjectURL(url);
-          alert(`✅ FCPXML 已导出\n\n📁 文件: ${fileName}\n🎬 保留片段: ${data.segments} 个\n\n直接拖入 Final Cut Pro 即可`);
-        } else {
-          alert('❌ 导出失败: ' + data.error);
-        }
+        const data = await postExport('/api/fcpxml', buildExportPayload());
+        const fileName = await downloadOutput(data.output);
+        alert(`✅ FCPXML 已导出\n\n📁 文件: ${fileName}\n🎬 保留片段: ${data.segments} 个\n\n直接拖入 Final Cut Pro 即可`);
       } catch (err) {
         alert('❌ 请求失败: ' + err.message + '\n\n请确保使用 review_server.js 启动服务');
+      }
+    }
+
+    async function exportEditedAudio(bitrate) {
+      closeExportMenu();
+      try {
+        const data = await postExport('/api/audio', buildExportPayload({ bitrate }));
+        let job = data.job || null;
+        if (data.jobId) {
+          updateExportProgress(job || { progress: 0, outTime: 0, duration: 0 }, `正在导出 MP3 ${bitrate}`);
+          job = await waitForExportJob(data.jobId, `正在导出 MP3 ${bitrate}`);
+          hideExportProgress();
+        }
+        const output = (job && job.output) || data.output;
+        const fileName = await downloadOutput(output);
+        alert(`✅ 音频已导出\n\n📁 文件: ${fileName}\n🎚️ 码率: ${(job && job.bitrate) || data.bitrate}\n🎬 保留片段: ${(job && job.segments) || data.segments} 个`);
+      } catch (err) {
+        hideExportProgress();
+        alert('❌ 音频导出失败: ' + err.message + '\n\n请确保已安装 ffmpeg，并使用 review_server.js 启动服务');
+      }
+    }
+
+    async function exportSRT() {
+      closeExportMenu();
+      try {
+        const data = await postExport('/api/srt', buildExportPayload());
+        const fileName = await downloadOutput(data.output);
+        alert(`✅ SRT 已导出\n\n📁 文件: ${fileName}\n📝 字幕条数: ${data.cues} 条`);
+      } catch (err) {
+        alert('❌ SRT 导出失败: ' + err.message + '\n\n请确保使用 review_server.js 启动服务');
       }
     }
 
