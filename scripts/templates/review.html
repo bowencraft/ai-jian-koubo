@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>剪口播 · 审核稿</title>
   <script src="/lib/compute_keeps.js"></script>
+  <script src="/lib/review_timeline_view.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Anton&family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -60,11 +61,11 @@
         <option value="1.5">1.5×</option>
         <option value="2">2×</option>
       </select>
-      <select id="silenceThreshold" onchange="applySilenceThreshold(parseFloat(this.value))" title="一键勾选逐字稿里 ≥ 此长度的停顿为「删除」（红色），你还能手动改。&#10;注意区别于切割参数的「内部静音切割」：那是导出时自动切掉保留段内残留的静音（黄色）。">
-        <option value="0.2" selected>静音 ≥ 0.2s</option>
-        <option value="0.3">静音 ≥ 0.3s</option>
-        <option value="0.5">静音 ≥ 0.5s</option>
-        <option value="1.0">静音 ≥ 1.0s</option>
+      <select id="silenceThreshold" onchange="applySilenceThreshold(parseFloat(this.value))" title="一键勾选逐字稿里 ≥ 此长度的气口/停顿为「删减」（红色），你还能手动改。">
+        <option value="0.2" selected>气口 ≥ 0.2s</option>
+        <option value="0.3">气口 ≥ 0.3s</option>
+        <option value="0.5">气口 ≥ 0.5s</option>
+        <option value="1.0">气口 ≥ 1.0s</option>
       </select>
       <span class="time-display"><span id="timeCur">00:00</span><span class="sep">/</span><span id="timeTot">00:00</span></span>
     </div>
@@ -109,7 +110,7 @@
               <div class="help-row">
                 <span><kbd>单击</kbd> 去那听</span>
                 <span><kbd>划过</kbd> 删 / 恢复</span>
-                <span><kbd>点静音</kbd> 删</span>
+                <span><kbd>点气口</kbd> 删</span>
               </div>
               <div class="help-row">
                 <span><kbd>Space</kbd> 播放</span>
@@ -138,7 +139,7 @@
         <!-- Cut params card -->
         <div class="card">
           <div class="card-head">
-            <span class="label">/ 静音剪辑</span>
+            <span class="label">/ 气口剪辑</span>
           </div>
           <div class="knobs-body">
             <div class="knob">
@@ -172,14 +173,18 @@
       <div class="dock-resizer" id="dockResizer" title="拖动调整波形高度"></div>
       <div class="tl-status">
         <div class="wave-legend">
-          <span class="wl"><span class="sw" id="lg-silence"></span>静音</span>
-          <span class="wl"><span class="sw" id="lg-del"></span>选中删除</span>
-          <span class="wl"><span class="sw" id="lg-cut"></span>额外切掉</span>
+          <span class="wl wl-normal"><span class="sw" id="lg-normal"></span>正常</span>
+          <span class="wl"><span class="sw" id="lg-del"></span>删减</span>
+          <span class="wl"><span class="sw" id="lg-breath"></span>气口</span>
           <span class="wl" id="projectSummary"></span>
         </div>
         <span class="sstat">总时长 <b id="tl-total">--:--</b></span>
         <span class="sstat sstat-final">剪后 <b id="tl-final">--:--</b></span>
         <div class="tl-zoom">
+          <div class="timeline-mode-switch" id="timelineModeSwitch" role="group" aria-label="时间线显示模式">
+            <button type="button" data-mode="overlay">叠加波形</button>
+            <button type="button" data-mode="strip">裁切条</button>
+          </div>
           <select id="themeSelect" title="波形配色"></select>
           <button onclick="waveZoom(1/1.6)" title="缩小">−</button>
           <input type="range" id="zoomSlider" min="0" max="1000" value="0" title="缩放">

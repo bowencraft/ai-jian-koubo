@@ -29,6 +29,27 @@ let words = [];
     let cutOpts = {                // 切割参数（与 lib/compute_keeps.js 默认一致，可被滑块覆盖）
       lookBack: 0.6, padStart: 2 / 30, padEnd: 2 / 30, minInternalSilence: 0.2
     };
+    const TimelineView = window.ReviewTimelineView || {};
+    const STATUS_COL = TimelineView.REVIEW_STATUS_COLORS || {
+      delete: 'rgba(239, 68, 68, 0.42)',
+      deleteEdge: 'rgba(239, 68, 68, 0.95)',
+      breath: 'rgba(6, 182, 212, 0.34)',
+      breathEdge: 'rgba(6, 182, 212, 0.88)',
+      playhead: '#f97316',
+    };
+    const normalizeTimelineMode = TimelineView.normalizeTimelineMode || (value => value === 'strip' ? 'strip' : 'overlay');
+    const resolveWaveTheme = TimelineView.resolveWaveTheme || (key => {
+      const themes = TimelineView.WAVE_THEMES || {};
+      const safeKey = themes[key] ? key : 'cool';
+      return { key: safeKey, theme: themes[safeKey] || {} };
+    });
+    const timelineModeKey = TimelineView.TIMELINE_MODE_KEY || 'reviewTimelineMode';
+    let timelineMode = normalizeTimelineMode(localStorage.getItem(timelineModeKey));
+    let currentProject = null;
+    let currentTrackCount = 0;
+    let projectAssetsById = new Map();
+    let waveReady = false;
+    let clipWaveformRaf = null;
 
     loadingOverlay.classList.add('show');
     const loadingMessages = ['正在加载字幕数据...', '正在解析音频波形...', '正在准备播放器...', '即将就绪...'];
@@ -41,6 +62,15 @@ let words = [];
     labelEl.textContent = loadingMessages[0];
 
     const fetchJSON = (url) => fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
+    const PROJECT_LABEL_W = 68;
+
+    function escapeHtml(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
 
     fetch('./data.json')
       .then(r => {
@@ -70,6 +100,7 @@ let words = [];
         renderProjectSummary((projectResp && projectResp.project) || data.project || data.timeline);
         const restored = applyDraft(draftResp && draftResp.draft);
 
+        initTimelineModeSwitcher();
         initWave();
 
         // 顶栏文件元信息
@@ -91,40 +122,70 @@ let words = [];
     function renderProjectSummary(project) {
       const el = document.getElementById('projectSummary');
       if (!el || !project || !Array.isArray(project.assets) || !Array.isArray(project.clips)) return;
-      const declaredTracks = Number((project.timeline && project.timeline.trackCount) || project.trackCount || 0);
-      const trackCount = Math.max(
-        declaredTracks,
-        project.clips.reduce((max, clip) => Math.max(max, Number(clip.trackIndex || clip.lane || 0) + 1), 0),
+      currentProject = project;
+      projectAssetsById = new Map(project.assets.map(asset => [asset.id, asset]));
+      currentTrackCount = Math.max(
+        (TimelineView.trackCountForProject ? TimelineView.trackCountForProject(project) : 0),
         1
       );
-      el.textContent = `多轨 ${project.assets.length} 素材 / ${trackCount || 1} 轨`;
-      renderProjectTracks(project, trackCount);
+      el.textContent = `多轨 ${project.assets.length} 素材 / ${currentTrackCount || 1} 轨`;
+      renderProjectTracks();
     }
 
-    function renderProjectTracks(project, trackCount) {
-      const root = document.getElementById('projectTracks');
-      if (!root) return;
-      const duration = Math.max(
+    function projectTimelineDuration() {
+      if (TimelineView.timelineDuration) return TimelineView.timelineDuration({ words, project: currentProject });
+      return Math.max(
+        1,
         words.reduce((max, w) => Math.max(max, Number(w.end) || 0), 0),
-        project.clips.reduce((max, clip) => Math.max(max, Number(clip.timelineStart || 0) + Number(clip.duration || 0)), 0),
-        1
+        currentProject && Array.isArray(currentProject.clips)
+          ? currentProject.clips.reduce((max, clip) => Math.max(max, Number(clip.timelineStart || 0) + Number(clip.duration || 0)), 0)
+          : 0
       );
-      const assets = new Map(project.assets.map(asset => [asset.id, asset]));
+    }
+
+    function projectViewState() {
+      const root = document.getElementById('projectTracks');
+      const view = waveReady && typeof wave !== 'undefined' && wave.getViewState ? wave.getViewState() : null;
+      if (view && view.pxPerSec > 0) return view;
+      const width = Math.max(1, root ? root.clientWidth : window.innerWidth);
+      const duration = projectTimelineDuration();
+      const timelineWidth = Math.max(1, width - PROJECT_LABEL_W);
+      const pxPerSec = timelineWidth / Math.max(1, duration);
+      return { viewStart: 0, pxPerSec, viewDuration: timelineWidth / pxPerSec, duration, labelWidth: PROJECT_LABEL_W, width };
+    }
+
+    function renderProjectTracks() {
+      const root = document.getElementById('projectTracks');
+      if (!root || !currentProject) return;
+      const view = projectViewState();
+      const viewEnd = view.viewStart + view.viewDuration;
+      const rootWidth = Math.max(1, root.clientWidth || view.width || 1);
       const rows = [];
-      for (let t = 0; t < trackCount; t++) {
-        const clips = project.clips
-          .filter(clip => Number(clip.trackIndex || clip.lane || 0) === t)
+      for (let t = 0; t < currentTrackCount; t++) {
+        const clips = currentProject.clips
+          .filter(clip => Number(clip.trackIndex != null ? clip.trackIndex : clip.lane || 0) === t)
           .map(clip => {
-            const asset = assets.get(clip.assetId) || { name: 'missing', kind: 'audio' };
-            const leftPct = (Number(clip.timelineStart || 0) / duration) * 100;
-            const widthPct = Math.max(1, (Number(clip.duration || 0) / duration) * 100);
+            const clipStart = Number(clip.timelineStart || 0);
+            const clipEnd = clipStart + Number(clip.duration || 0);
+            if (clipEnd <= view.viewStart || clipStart >= viewEnd) return '';
+            const asset = projectAssetsById.get(clip.assetId) || { id: clip.assetId, name: 'missing', kind: 'audio' };
+            const left = view.labelWidth + (Math.max(clipStart, view.viewStart) - view.viewStart) * view.pxPerSec;
+            const right = view.labelWidth + (Math.min(clipEnd, viewEnd) - view.viewStart) * view.pxPerSec;
+            const width = Math.max(18, Math.min(rootWidth - left + 4, right - left));
             const kind = asset.kind === 'video' || asset.hasVideo ? 'video' : 'audio';
-            return `<div class="project-clip ${kind}" style="left:calc(68px + ${leftPct}%);width:calc(${widthPct}% - 2px)">${asset.name || asset.id}</div>`;
+            const title = `${asset.name || asset.id} · ${formatTime(clipStart)}-${formatTime(clipEnd)} · 源 ${formatTime(Number(clip.sourceStart || 0))}`;
+            const waveform = asset.hasAudio !== false
+              ? `<canvas class="clip-waveform" data-clip-id="${escapeHtml(clip.id)}"></canvas>`
+              : '';
+            return `<div class="project-clip ${kind}" data-clip-id="${escapeHtml(clip.id)}" data-asset-id="${escapeHtml(asset.id)}" title="${escapeHtml(title)}" style="left:${left}px;width:${width}px">
+              <span class="clip-title">${escapeHtml(asset.name || asset.id)}</span>${waveform}
+            </div>`;
           }).join('');
         rows.push(`<div class="project-track"><div class="project-track-label">轨 ${t + 1}</div>${clips}</div>`);
       }
       root.innerHTML = rows.join('');
       root.style.display = rows.length ? 'block' : 'none';
+      scheduleProjectWaveformDraw();
     }
 
     function togglePlay()  { clearPreview(); video.paused ? video.play() : video.pause(); }
@@ -133,50 +194,153 @@ let words = [];
 
     // ============================================================
     // 波形渲染器（自绘 canvas）：视口窗口化渲染，长视频也顺滑
-    // 叠加三色带：灰=静音 / 红=选中删除 / 黄=算法额外切掉（吸附+内部静音二次切）
+    // 状态带：青蓝=气口 / 红=删减；正常内容保持 clip 与波形原色
     // ============================================================
-    // 波形配色主题（可在时间线右下角实时切换，选择存 localStorage）
-    const WAVE_THEMES = {
+    // 波形配色主题（主题只影响普通波形，不影响删减/气口/播放头语义色）
+    const WAVE_THEMES = TimelineView.WAVE_THEMES || {
       cool: {
         name: '冷调蓝白',
-        bg: '#0E0E13', wave: '#8CA0C8', center: '#23252E', silence: 'rgba(44,46,54,0.9)',
-        del: 'rgba(248,113,113,0.40)', delEdge: 'rgba(248,113,113,0.95)',
-        cut: 'rgba(255,193,7,0.40)', cutEdge: 'rgba(255,193,7,0.98)', head: '#FF7A4D'
+        bg: '#0E0E13',
+        wave: '#8CA0C8',
+        waveSoft: 'rgba(140,160,200,0.36)',
+        center: '#23252E',
+        clipWave: 'rgba(80,198,236,.78)',
+        clipWaveEdge: 'rgba(180,226,244,.48)',
       },
-      mint: {
-        name: '薄荷青',
-        bg: '#0D0F0E', wave: '#5EEAD4', center: '#1F2826', silence: 'rgba(40,48,46,0.9)',
-        del: 'rgba(251,113,133,0.40)', delEdge: 'rgba(251,113,133,0.95)',
-        cut: 'rgba(251,146,60,0.42)', cutEdge: 'rgba(251,146,60,0.98)', head: '#FB7185'
-      },
-      recut: {
-        name: 'Recut 暖灰',
-        bg: '#1A1917', wave: '#A89F90', center: '#2A2823', silence: 'rgba(52,50,46,0.92)',
-        del: 'rgba(248,113,113,0.42)', delEdge: 'rgba(248,113,113,0.92)',
-        cut: 'rgba(251,191,36,0.42)', cutEdge: 'rgba(251,191,36,0.96)', head: '#FF7A4D'
-      },
-      outline: {
-        name: '石墨霓虹·描边',
-        bg: '#101014', wave: '#B7BCC9', center: '#26262C', silence: 'rgba(42,42,48,0.9)',
-        del: 'rgba(248,113,113,0.16)', delEdge: 'rgba(248,113,113,1)',
-        cut: 'rgba(255,212,59,0.16)', cutEdge: 'rgba(255,212,59,1)', head: '#FF7A4D'
-      }
     };
-    const WAVE_THEME_KEY = 'reviewWaveTheme';
+    const WAVE_THEME_KEY = TimelineView.WAVE_THEME_KEY || 'reviewWaveTheme';
+    let currentThemeKey = 'cool';
     let COL = WAVE_THEMES.cool;
     (function () {
       const saved = localStorage.getItem(WAVE_THEME_KEY);
-      if (saved && WAVE_THEMES[saved]) COL = WAVE_THEMES[saved];
+      const resolved = resolveWaveTheme(saved);
+      currentThemeKey = resolved.key;
+      COL = resolved.theme;
     })();
 
+    const ClipWaveformRenderer = {
+      percentile(values, ratio) {
+        if (!values.length) return 0;
+        const sorted = Array.from(values).sort((a, b) => a - b);
+        const index = (TimelineView.clamp || ((v, min, max) => Math.max(min, Math.min(max, v))))(
+          Math.floor((sorted.length - 1) * ratio),
+          0,
+          sorted.length - 1
+        );
+        return sorted[index] || 0;
+      },
+
+      draw(canvas, peaks, clip, assetDuration) {
+        const rect = canvas.getBoundingClientRect();
+        const width = Math.max(1, Math.floor(rect.width));
+        const height = Math.max(1, Math.floor(rect.height));
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(width * ratio);
+        canvas.height = Math.floor(height * ratio);
+        const cctx = canvas.getContext('2d');
+        cctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        cctx.clearRect(0, 0, width, height);
+
+        if (!Array.isArray(peaks) || peaks.length < 2 || !(assetDuration > 0)) return;
+
+        const clamp = TimelineView.clamp || ((v, min, max) => Math.max(min, Math.min(max, v)));
+        const num = TimelineView.num || ((value, fallback = 0) => {
+          const n = Number(value);
+          return Number.isFinite(n) ? n : fallback;
+        });
+        const baseline = height - 1;
+        const sourceStart = clamp(num(clip.sourceStart), 0, assetDuration);
+        const sourceEnd = clamp(sourceStart + num(clip.duration), sourceStart, assetDuration);
+        const startIndex = (sourceStart / assetDuration) * peaks.length;
+        const endIndex = Math.max(startIndex + 1, (sourceEnd / assetDuration) * peaks.length);
+        const sourceLength = Math.max(1, endIndex - startIndex);
+        const envelope = new Float32Array(width);
+
+        for (let x = 0; x < width; x++) {
+          const bucketStart = startIndex + (x / width) * sourceLength;
+          const bucketEnd = startIndex + ((x + 1) / width) * sourceLength;
+          const from = clamp(Math.floor(bucketStart), 0, peaks.length - 1);
+          const to = clamp(Math.ceil(bucketEnd), from + 1, peaks.length);
+          let peak = 0;
+          if (to - from <= 1) {
+            const left = Math.max(0, Math.min(peaks.length - 1, from));
+            const right = Math.max(0, Math.min(peaks.length - 1, left + 1));
+            const mix = bucketStart - Math.floor(bucketStart);
+            peak = (Math.abs(Number(peaks[left]) || 0) * (1 - mix)) + (Math.abs(Number(peaks[right]) || 0) * mix);
+          } else {
+            for (let i = from; i < to; i++) peak = Math.max(peak, Math.abs(Number(peaks[i]) || 0));
+          }
+          envelope[x] = Math.min(1, peak);
+        }
+
+        const floor = this.percentile(envelope, 0.08);
+        const ceiling = Math.max(this.percentile(envelope, 0.985), floor + 0.01);
+        for (let x = 0; x < width; x++) {
+          const normalized = clamp((envelope[x] - floor) / (ceiling - floor), 0, 1);
+          envelope[x] = Math.pow(normalized, 1.18);
+        }
+
+        cctx.fillStyle = COL.clipWave || COL.wave;
+        cctx.beginPath();
+        cctx.moveTo(0, baseline);
+        for (let x = 0; x < width; x++) {
+          const y = baseline - Math.max(0, envelope[x] * (height - 2));
+          cctx.lineTo(x, y);
+        }
+        cctx.lineTo(width, baseline);
+        cctx.closePath();
+        cctx.fill();
+
+        cctx.strokeStyle = COL.clipWaveEdge || COL.waveSoft || COL.wave;
+        cctx.beginPath();
+        for (let x = 0; x < width; x++) {
+          const y = baseline - Math.max(0, envelope[x] * (height - 2));
+          if (x === 0) cctx.moveTo(x, y);
+          else cctx.lineTo(x, y);
+        }
+        cctx.stroke();
+      }
+    };
+
+    function drawProjectClipWaveforms() {
+      if (!currentProject) return;
+      const view = projectViewState();
+      const viewEnd = view.viewStart + view.viewDuration;
+      document.querySelectorAll('canvas.clip-waveform').forEach((canvas) => {
+        const clip = currentProject.clips.find(item => item.id === canvas.dataset.clipId);
+        const asset = clip ? projectAssetsById.get(clip.assetId) : null;
+        const visible = clip && TimelineView.clipVisibleSourceWindow
+          ? TimelineView.clipVisibleSourceWindow({ clip, viewStart: view.viewStart, viewEnd })
+          : null;
+        if (!clip || !asset || !visible || !Array.isArray(asset.waveform) || asset.waveform.length < 2) {
+          canvas.style.display = 'none';
+          return;
+        }
+        canvas.style.display = 'block';
+        ClipWaveformRenderer.draw(canvas, asset.waveform, {
+          ...clip,
+          sourceStart: visible.sourceStart,
+          duration: visible.duration,
+        }, Number(asset.duration || clip.duration || 0));
+      });
+    }
+
+    function scheduleProjectWaveformDraw() {
+      if (clipWaveformRaf) return;
+      clipWaveformRaf = requestAnimationFrame(() => {
+        clipWaveformRaf = null;
+        drawProjectClipWaveforms();
+      });
+    }
+
     const wave = (function () {
-      let cv, ctx, buf, bctx, rcv, rctx, dpr = 1;
+      let root, cv, ctx, buf, bctx, rcv, rctx, dpr = 1;
       let cssW = 0, cssH = 132, rulerH = 20;
       let duration = 0;
       let pxPerSec = 1, viewStart = 0;
       let staticDirty = true, lastKey = '';
       let cutsDirty = true; // 切割几何（选段/参数）是否需要重算；与视口平移/缩放无关
-      let deleteSegs = [], extraCuts = [];
+      let deleteSegs = [];
       let drag = null;
       let gain = 1; // 波形归一化增益：把全局峰值拉到接近满高（像剪映/FCP 那样自适应填满）
       const ZOOM_MAX = 400; // 相对 fit 的最大放大倍数
@@ -189,10 +353,11 @@ let words = [];
         gain = mx > 0.0001 ? 0.92 / mx : 1;
       }
 
-      const timeToX = (t) => (t - viewStart) * pxPerSec;
-      const xToTime = (x) => viewStart + x / pxPerSec;
-      const viewDur = () => cssW / pxPerSec;
-      const fitPxPerSec = () => (duration > 0 ? cssW / duration : 1);
+      const timelineWidth = () => Math.max(1, cssW - PROJECT_LABEL_W);
+      const timeToX = (t) => PROJECT_LABEL_W + (t - viewStart) * pxPerSec;
+      const xToTime = (x) => viewStart + Math.max(0, x - PROJECT_LABEL_W) / pxPerSec;
+      const viewDur = () => timelineWidth() / pxPerSec;
+      const fitPxPerSec = () => (duration > 0 ? timelineWidth() / duration : 1);
 
       function clampView() {
         const vd = viewDur();
@@ -204,15 +369,13 @@ let words = [];
         deleteSegs = getDeleteSegments();
         if (typeof ComputeKeeps !== 'undefined') {
           const keeps = ComputeKeeps.computeFinalKeeps(deleteSegs, silencePeriods, duration, cutOpts);
-          const cuts = ComputeKeeps.keepsToCuts(keeps, duration);
-          extraCuts = ComputeKeeps.intervalSubtract(cuts, deleteSegs); // 用户没选、却被算法切掉的部分
           // 状态栏：总时长 / 剪后
           let finalDur = 0;
           for (const k of keeps) finalDur += (k.end - k.start);
           const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
           set('tl-total', formatTime(duration));
           set('tl-final', formatTime(finalDur));
-        } else { extraCuts = []; }
+        }
       }
 
       function layout() {
@@ -231,6 +394,10 @@ let words = [];
         if (!rctx) return;
         rctx.clearRect(0, 0, cssW, rulerH);
         rctx.fillStyle = '#1A1A1F'; rctx.fillRect(0, 0, cssW, rulerH);
+        rctx.fillStyle = 'rgba(14,14,19,.9)';
+        rctx.fillRect(0, 0, PROJECT_LABEL_W, rulerH);
+        rctx.fillStyle = 'rgba(255,255,255,.1)';
+        rctx.fillRect(PROJECT_LABEL_W - 0.5, 0, 1, rulerH);
         const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
         const minPx = 70; // 相邻主刻度最小像素间距
         let step = steps[steps.length - 1];
@@ -258,65 +425,64 @@ let words = [];
 
       function buildStatic() {
         bctx.clearRect(0, 0, cssW, cssH);
-        bctx.fillStyle = COL.bg; bctx.fillRect(0, 0, cssW, cssH);
-        const mid = cssH / 2;
-
-        // 静音带（最底层）
-        bctx.fillStyle = COL.silence;
-        for (const sp of silencePeriods) {
-          const x0 = timeToX(sp.start), x1 = timeToX(sp.end);
-          if (x1 < 0 || x0 > cssW) continue;
-          bctx.fillRect(x0, 0, Math.max(1, x1 - x0), cssH);
+        if (timelineMode === 'strip') {
+          bctx.fillStyle = COL.bg || '#0E0E13';
+          bctx.fillRect(0, 0, cssW, cssH);
+          bctx.fillStyle = 'rgba(14,14,19,.9)';
+          bctx.fillRect(0, 0, PROJECT_LABEL_W, cssH);
+          bctx.fillStyle = 'rgba(255,255,255,.1)';
+          bctx.fillRect(PROJECT_LABEL_W - 0.5, 0, 1, cssH);
+        } else {
+          drawMixedWaveform();
         }
 
-        // 波形：填充镜像包络（替代逐像素硬竖条，贴近剪映/FCP 观感）
+        drawBand(silencePeriods, STATUS_COL.breath, STATUS_COL.breathEdge);
+        drawBand(deleteSegs, STATUS_COL.delete, STATUS_COL.deleteEdge);
+      }
+
+      function drawMixedWaveform() {
+        const mid = cssH / 2;
         const peaks = peaksData ? peaksData.peaks : null;
         const n = peaks ? peaks.length : 0;
         if (peaks && n > 1 && duration > 0) {
           const samplesPerSec = n / duration;
-          const maxH = cssH - 6;
-          // 1) 逐像素求幅值：样本多→取峰（包络）；样本少→线性插值（消除放大时的阶梯）
-          const amp = new Float32Array(cssW);
-          for (let x = 0; x < cssW; x++) {
+          const maxH = Math.max(8, cssH - 10);
+          const amp = new Float32Array(Math.max(1, cssW - PROJECT_LABEL_W));
+          for (let i = 0; i < amp.length; i++) {
+            const x = PROJECT_LABEL_W + i;
             const sa = xToTime(x) * samplesPerSec, sb = xToTime(x + 1) * samplesPerSec;
             if (sb - sa >= 1) {
-              amp[x] = peakAt(sa, sb, peaks, n);
+              amp[i] = peakAt(sa, sb, peaks, n);
             } else {
               const f = Math.max(0, Math.min(n - 1, (sa + sb) / 2));
-              const i = f | 0, fr = f - i;
-              amp[x] = (peaks[i] || 0) * (1 - fr) + (peaks[Math.min(n - 1, i + 1)] || 0) * fr;
+              const idx = f | 0, fr = f - idx;
+              amp[i] = (peaks[idx] || 0) * (1 - fr) + (peaks[Math.min(n - 1, idx + 1)] || 0) * fr;
             }
           }
-          // 2) 描出上沿（左→右）再回描下沿（右→左），填成镜像包络。
-          //    hAt(x) 现算 3-tap 平滑（消尖刺）+ 全局增益归一化再限幅，省掉一条整长数组和一趟循环。
-          const hAt = (x) => {
-            const a = x > 0 ? amp[x - 1] : amp[x];
-            const c = x < cssW - 1 ? amp[x + 1] : amp[x];
-            const v = (a + amp[x] * 2 + c) / 4;
+          const hAt = (i) => {
+            const a = i > 0 ? amp[i - 1] : amp[i];
+            const c = i < amp.length - 1 ? amp[i + 1] : amp[i];
+            const v = (a + amp[i] * 2 + c) / 4;
             return Math.max(0.6, Math.min(1, v * gain) * maxH / 2);
           };
-          bctx.fillStyle = COL.wave;
+          bctx.fillStyle = COL.waveSoft || COL.wave;
           bctx.beginPath();
-          bctx.moveTo(0, mid - hAt(0));
-          for (let x = 1; x < cssW; x++) bctx.lineTo(x, mid - hAt(x));
-          for (let x = cssW - 1; x >= 0; x--) bctx.lineTo(x, mid + hAt(x));
+          bctx.moveTo(PROJECT_LABEL_W, mid - hAt(0));
+          for (let i = 1; i < amp.length; i++) bctx.lineTo(PROJECT_LABEL_W + i, mid - hAt(i));
+          for (let i = amp.length - 1; i >= 0; i--) bctx.lineTo(PROJECT_LABEL_W + i, mid + hAt(i));
           bctx.closePath();
           bctx.fill();
         } else {
-          bctx.fillStyle = COL.center;
-          bctx.fillRect(0, mid - 0.5, cssW, 1);
+          bctx.fillStyle = COL.center || 'rgba(255,255,255,.16)';
+          bctx.fillRect(PROJECT_LABEL_W, mid - 0.5, Math.max(1, cssW - PROJECT_LABEL_W), 1);
         }
-
-        // 删除带（红）
-        drawBand(deleteSegs, COL.del, COL.delEdge);
-        // 额外切掉（黄）—— 这正是「把你该说的话切掉」的高危区
-        drawBand(extraCuts, COL.cut, COL.cutEdge);
       }
 
       function drawBand(segs, fill, edge) {
         for (const s of segs) {
-          const x0 = timeToX(s.start), x1 = timeToX(s.end);
-          if (x1 < 0 || x0 > cssW) continue;
+          const x0Raw = timeToX(s.start), x1 = timeToX(s.end);
+          if (x1 < PROJECT_LABEL_W || x0Raw > cssW) continue;
+          const x0 = Math.max(PROJECT_LABEL_W, x0Raw);
           const w = Math.max(1.5, x1 - x0);
           bctx.fillStyle = fill; bctx.fillRect(x0, 0, w, cssH);
           bctx.fillStyle = edge;
@@ -330,22 +496,28 @@ let words = [];
         // 播放跟随：playhead 越过右侧 85% 时把视图前移到 15% 处（仅放大时）
         if (!video.paused && pxPerSec > fitPxPerSec() + 1e-6) {
           const x = timeToX(t);
-          if (x > cssW * 0.85 || x < 0) { viewStart = t - viewDur() * 0.15; clampView(); staticDirty = true; }
+          if (x > cssW * 0.85 || x < PROJECT_LABEL_W) { viewStart = t - viewDur() * 0.15; clampView(); staticDirty = true; }
         }
         // 切割几何只在选段/参数变化时重算；平移缩放只需重画静态层
         if (cutsDirty) { recompute(); cutsDirty = false; }
-        const key = viewStart.toFixed(3) + '|' + pxPerSec.toFixed(3);
-        if (staticDirty || key !== lastKey) { buildStatic(); drawRuler(); syncZoomSlider(); lastKey = key; staticDirty = false; }
+        const key = timelineMode + '|' + cssW + '|' + cssH + '|' + viewStart.toFixed(3) + '|' + pxPerSec.toFixed(3);
+        if (staticDirty || key !== lastKey) {
+          buildStatic();
+          drawRuler();
+          syncZoomSlider();
+          renderProjectTracks();
+          lastKey = key;
+          staticDirty = false;
+        }
 
         ctx.clearRect(0, 0, cssW, cssH);
         ctx.drawImage(buf, 0, 0, cssW, cssH);
 
         // 播放头
         const hx = timeToX(t);
-        if (hx >= 0 && hx <= cssW) {
-          ctx.fillStyle = COL.head;
+        if (hx >= PROJECT_LABEL_W && hx <= cssW) {
+          ctx.fillStyle = STATUS_COL.playhead;
           ctx.fillRect(hx - 0.5, 0, 1.5, cssH);
-          ctx.beginPath(); ctx.arc(hx, 4, 3, 0, Math.PI * 2); ctx.fill();
         }
       }
 
@@ -357,12 +529,29 @@ let words = [];
         const fit = fitPxPerSec();
         const next = Math.max(fit, Math.min(pxPerSec * factor, fit * 400));
         if (next === pxPerSec) return;
-        const ax = timeToX(at);
+        const ax = timeToX(at) - PROJECT_LABEL_W;
         pxPerSec = next;
         viewStart = at - ax / pxPerSec; // 锚点时间保持在原屏幕位置
         clampView(); redraw();
       }
       function fit() { pxPerSec = fitPxPerSec(); viewStart = 0; redraw(); }
+
+      function getViewState() {
+        return {
+          viewStart,
+          pxPerSec,
+          viewDuration: viewDur(),
+          duration,
+          labelWidth: PROJECT_LABEL_W,
+          width: cssW,
+        };
+      }
+
+      function resize() {
+        layout();
+        clampView();
+        redraw();
+      }
 
       // 缩放滑块 0..1000 ↔ pxPerSec（对数，0=fit，1000=最大）
       const slider = () => document.getElementById('zoomSlider');
@@ -376,46 +565,49 @@ let words = [];
         const fit = fitPxPerSec();
         const next = fit * Math.pow(ZOOM_MAX, Math.max(0, Math.min(1, frac01)));
         const at = video.currentTime;
-        const ax = timeToX(at);
+        const ax = timeToX(at) - PROJECT_LABEL_W;
         pxPerSec = next;
         viewStart = at - ax / pxPerSec;
         clampView(); redraw();
       }
 
       function init() {
+        root = document.getElementById('waveform');
         cv = document.getElementById('waveCanvas');
         rcv = document.getElementById('rulerCanvas');
         buf = document.createElement('canvas');
         ctx = cv.getContext('2d');
         bctx = buf.getContext('2d');
         rctx = rcv ? rcv.getContext('2d') : null;
-        duration = (peaksData && peaksData.duration) || video.duration || 0;
+        duration = Math.max((peaksData && peaksData.duration) || 0, video.duration || 0, projectTimelineDuration());
         computeGain();
         layout();
         pxPerSec = fitPxPerSec();
         viewStart = 0;
 
-        new ResizeObserver(() => { layout(); clampView(); draw(video.currentTime); }).observe(cv);
+        new ResizeObserver(() => { layout(); clampView(); draw(video.currentTime); }).observe(root || cv);
         video.addEventListener('loadedmetadata', () => {
-          if (!duration) { duration = video.duration || 0; fit(); }
+          const nextDuration = Math.max(duration || 0, video.duration || 0, projectTimelineDuration());
+          if (!duration || nextDuration !== duration) { duration = nextDuration; fit(); }
         });
 
         // 滚轮缩放（以光标处时间为锚点）
-        cv.addEventListener('wheel', (e) => {
+        (root || cv).addEventListener('wheel', (e) => {
           e.preventDefault();
-          const r = cv.getBoundingClientRect();
+          const r = (root || cv).getBoundingClientRect();
           zoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, xToTime(e.clientX - r.left));
         }, { passive: false });
 
         // 按下：拖动平移；未移动则点击跳转
-        cv.addEventListener('mousedown', (e) => {
-          const r = cv.getBoundingClientRect();
+        (root || cv).addEventListener('mousedown', (e) => {
+          if (e.button !== 0) return;
+          const r = (root || cv).getBoundingClientRect();
           drag = { x0: e.clientX - r.left, vs0: viewStart, moved: false };
           e.preventDefault();
         });
         window.addEventListener('mousemove', (e) => {
           if (!drag) return;
-          const r = cv.getBoundingClientRect();
+          const r = (root || cv).getBoundingClientRect();
           const dx = (e.clientX - r.left) - drag.x0;
           if (Math.abs(dx) > 3) drag.moved = true;
           if (drag.moved && pxPerSec > fitPxPerSec() + 1e-6) {
@@ -425,7 +617,7 @@ let words = [];
         window.addEventListener('mouseup', (e) => {
           if (!drag) return;
           if (!drag.moved) {
-            const r = cv.getBoundingClientRect();
+            const r = (root || cv).getBoundingClientRect();
             const t = Math.max(0, Math.min(duration, xToTime(e.clientX - r.left)));
             clearPreview();
             video.currentTime = t;
@@ -437,31 +629,70 @@ let words = [];
         const sl = slider();
         if (sl) sl.addEventListener('input', () => setZoomFrac(parseInt(sl.value, 10) / 1000));
 
+        waveReady = true;
         draw(0);
       }
 
-      return { init, draw, markDirty, redraw, zoom, fit };
+      return { init, draw, getViewState, markDirty, redraw, resize, zoom, fit };
     })();
 
     function initWave() { wave.init(); }
     function waveZoom(f) { wave.zoom(f); }
     function waveZoomFit() { wave.fit(); }
 
+    function setTimelineMode(mode, persist) {
+      timelineMode = normalizeTimelineMode(mode);
+      const root = document.getElementById('waveform');
+      if (root) {
+        root.classList.toggle('timeline-mode-overlay', timelineMode === 'overlay');
+        root.classList.toggle('timeline-mode-strip', timelineMode === 'strip');
+      }
+      const switcher = document.getElementById('timelineModeSwitch');
+      if (switcher) {
+        switcher.querySelectorAll('[data-mode]').forEach((button) => {
+          button.classList.toggle('active', button.dataset.mode === timelineMode);
+          button.setAttribute('aria-pressed', button.dataset.mode === timelineMode ? 'true' : 'false');
+        });
+      }
+      if (persist) {
+        try { localStorage.setItem(timelineModeKey, timelineMode); } catch (e) {}
+      }
+      if (waveReady && wave.resize) wave.resize();
+    }
+
+    function initTimelineModeSwitcher() {
+      const switcher = document.getElementById('timelineModeSwitch');
+      const stored = localStorage.getItem(timelineModeKey);
+      const resolved = normalizeTimelineMode(stored);
+      setTimelineMode(resolved, !!stored && stored !== resolved);
+      if (!switcher) return;
+      switcher.querySelectorAll('[data-mode]').forEach((button) => {
+        button.addEventListener('click', () => setTimelineMode(button.dataset.mode, true));
+      });
+    }
+
     // 波形配色：实时切换 + 同步图例色块 + 持久化
     function applyWaveTheme(key, persist) {
-      if (!WAVE_THEMES[key]) return;
-      COL = WAVE_THEMES[key];
+      const resolved = resolveWaveTheme(key);
+      currentThemeKey = resolved.key;
+      COL = resolved.theme;
       const setSw = (id, c) => { const el = document.getElementById(id); if (el) el.style.background = c; };
-      setSw('lg-silence', COL.silence);
-      setSw('lg-del', COL.delEdge);
-      setSw('lg-cut', COL.cutEdge);
-      if (persist) { try { localStorage.setItem(WAVE_THEME_KEY, key); } catch (e) {} }
+      setSw('lg-normal', COL.wave || COL.clipWave || '#8CA0C8');
+      setSw('lg-del', STATUS_COL.deleteEdge || STATUS_COL.delete);
+      setSw('lg-breath', STATUS_COL.breathEdge || STATUS_COL.breath);
+      if (persist || key !== currentThemeKey) {
+        try { localStorage.setItem(WAVE_THEME_KEY, currentThemeKey); } catch (e) {}
+      }
+      const sel = document.getElementById('themeSelect');
+      if (sel && sel.value !== currentThemeKey) sel.value = currentThemeKey;
       if (typeof wave !== 'undefined') wave.redraw(); // redraw 已重建静态层，无需再 markDirty
+      renderProjectTracks();
+      scheduleProjectWaveformDraw();
     }
     function initThemeSwitcher() {
       const sel = document.getElementById('themeSelect');
       if (!sel) return;
-      const current = localStorage.getItem(WAVE_THEME_KEY) || 'cool';
+      const current = resolveWaveTheme(localStorage.getItem(WAVE_THEME_KEY)).key;
       sel.innerHTML = Object.keys(WAVE_THEMES)
         .map(k => `<option value="${k}"${k === current ? ' selected' : ''}>${WAVE_THEMES[k].name}</option>`)
         .join('');
@@ -469,7 +700,7 @@ let words = [];
       applyWaveTheme(current, false); // 同步图例色块到当前主题
     }
 
-    // 切割参数滑块：实时重算波形上的「额外切掉」预览，并在导出时一并发给 server
+    // 切割参数滑块：导出时一并发给 server，预览和导出使用同一套切点参数
     function initKnobs() {
       // 吸附窗口(lookBack)与内部静音切割(minInternalSilence)已固定为默认值（见 cutOpts），
       // 不再暴露为滑块——它们是「工具自动做对的事」，面板用静态说明讲清机制即可。

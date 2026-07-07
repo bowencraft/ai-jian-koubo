@@ -421,17 +421,16 @@
     .dock-resizer:hover::after,
     .dock-resizer.dragging::after { background: var(--ember); }
     .project-tracks {
-      display: none;
-      max-height: 96px;
+      display: block;
+      max-height: none;
       overflow: hidden;
-      border: 1px solid var(--line);
-      border-bottom: 0;
-      border-radius: 6px 6px 0 0;
-      background: rgba(12,13,18,.72);
+      border: 0;
+      border-radius: 0;
+      background: transparent;
     }
     .project-track {
       position: relative;
-      height: 30px;
+      height: 34px;
       border-bottom: 1px solid rgba(255,255,255,.08);
     }
     .project-track:last-child { border-bottom: 0; }
@@ -450,7 +449,7 @@
     .project-clip {
       position: absolute;
       top: 5px;
-      height: 20px;
+      height: 24px;
       min-width: 12px;
       border-radius: 4px;
       border: 1px solid rgba(108,160,255,.56);
@@ -458,12 +457,12 @@
       color: var(--paper-100);
       font-family: var(--mono);
       font-size: 10px;
-      line-height: 18px;
+      line-height: 14px;
       padding: 0 5px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      pointer-events: none;
+      pointer-events: auto;
     }
     .project-clip.audio {
       border-color: rgba(52,211,153,.56);
@@ -476,15 +475,53 @@
     }
     #waveform {
       position: relative;
+      border: 1px solid var(--line);
       border-radius: 6px;
       overflow: hidden;
+      background: #0e0e13;
     }
     #waveCanvas {
       display: block;
       width: 100%;
       height: var(--wave-h, 132px);
       cursor: text;
-      border-radius: 0 0 6px 6px;
+      border-radius: 0;
+    }
+    #waveform.timeline-mode-overlay #waveCanvas {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 0;
+      height: 100%;
+      z-index: 5;
+      pointer-events: auto;
+      background: transparent;
+    }
+    #waveform.timeline-mode-strip #waveCanvas {
+      position: relative;
+      height: 24px;
+      border-bottom: 1px solid rgba(255,255,255,.1);
+      background: #0e0e13;
+    }
+    #waveform.timeline-mode-overlay .project-tracks {
+      min-height: var(--wave-h, 132px);
+    }
+    .clip-title {
+      position: relative;
+      z-index: 2;
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .clip-waveform {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 2px;
+      width: 100%;
+      height: 12px;
+      opacity: .78;
+      pointer-events: none;
     }
     .tl-status {
       display: flex;
@@ -498,13 +535,15 @@
     .tl-status .sstat b { color: var(--paper-100); font-weight: 700; }
     .tl-status .sstat-final b { color: #6CA0FF; }
     .wave-legend {
-      display: flex; gap: 12px; align-items: center;
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
     }
     .wave-legend .wl { display: inline-flex; align-items: center; gap: 4px; }
     .wave-legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
     .tl-zoom {
       margin-left: auto;
       display: flex; align-items: center; gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
     .tl-zoom button {
       font-family: var(--mono); font-size: 11px;
@@ -520,6 +559,32 @@
       border: 1px solid var(--line); background: var(--ink-3);
       color: var(--paper-100); border-radius: 5px; cursor: pointer;
       margin-right: 4px;
+    }
+    .timeline-mode-switch {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .timeline-mode-switch button {
+      font-family: var(--mono);
+      font-size: 11px;
+      height: 22px;
+      width: auto;
+      padding: 0 8px;
+      border: 0;
+      border-right: 1px solid var(--line);
+      border-radius: 0;
+      background: var(--ink-3);
+      color: var(--paper-400);
+      cursor: pointer;
+      margin: 0;
+    }
+    .timeline-mode-switch button:last-child { border-right: 0; }
+    .timeline-mode-switch button.active {
+      color: var(--paper-100);
+      background: rgba(108,160,255,.22);
     }
 
     /* 切割参数滑块 */
