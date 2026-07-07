@@ -111,6 +111,7 @@ fi
 
 cp "$SCRIPT_DIR/review_server.js" "$PACKAGE_DIR/server/review_server.js"
 cp "$SCRIPT_DIR/lib/compute_keeps.js" "$PACKAGE_DIR/server/lib/compute_keeps.js"
+cp "$SCRIPT_DIR/lib/review_timeline_view.js" "$PACKAGE_DIR/server/lib/review_timeline_view.js"
 cp "$SCRIPT_DIR/lib/fcpxml.js" "$PACKAGE_DIR/server/lib/fcpxml.js"
 cp "$SCRIPT_DIR/lib/review_exports.js" "$PACKAGE_DIR/server/lib/review_exports.js"
 cp "$SCRIPT_DIR/lib/refine_boundaries.js" "$PACKAGE_DIR/server/lib/refine_boundaries.js"

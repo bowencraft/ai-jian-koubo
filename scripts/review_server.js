@@ -297,9 +297,10 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 共享切割算法模块：从 scripts/lib 单一来源直供前端，避免拷贝漂移
-  if (req.method === 'GET' && req.url.split('?')[0] === '/lib/compute_keeps.js') {
-    const libPath = path.join(__dirname, 'lib', 'compute_keeps.js');
+  // 共享前端模块：从 scripts/lib 单一来源直供前端，避免拷贝漂移
+  const libRequest = req.method === 'GET' ? req.url.split('?')[0] : '';
+  if (libRequest === '/lib/compute_keeps.js' || libRequest === '/lib/review_timeline_view.js') {
+    const libPath = path.join(__dirname, 'lib', path.basename(libRequest));
     if (fs.existsSync(libPath)) {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
       fs.createReadStream(libPath).pipe(res);
