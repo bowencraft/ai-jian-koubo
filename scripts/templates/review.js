@@ -22,34 +22,28 @@ let words = [];
     const undoStack = [];             // 每次编辑前的 selected 快照
     let previewUntil = null;          // 「试听这段」时播放到此秒数即停（且期间不跳删除段）
     let currentProjectSignature = null;
+    let reviewDir = '';
 
     // 波形 / 切割预览数据
     let peaksData = null;          // { duration, sampleRate, peaks:[0..1] }
-    let silencePeriods = [];       // ffmpeg 检测的静音段
+    let silencePeriods = [];       // ffmpeg/能量检测的静音段，仅用于切点吸附
+    let breathSegments = [];       // transcript 中可点击的气口段，用于青蓝标注
     let cutOpts = {                // 切割参数（与 lib/compute_keeps.js 默认一致，可被滑块覆盖）
-      lookBack: 0.6, padStart: 2 / 30, padEnd: 2 / 30, minInternalSilence: 0.2
+      lookBack: 0.6, padStart: 2 / 30, padEnd: 2 / 30, minInternalSilence: 0.2, trimInternalSilence: false
     };
     const TimelineView = window.ReviewTimelineView || {};
     const STATUS_COL = TimelineView.REVIEW_STATUS_COLORS || {
       delete: 'rgba(239, 68, 68, 0.42)',
-      deleteEdge: 'rgba(239, 68, 68, 0.95)',
       breath: 'rgba(6, 182, 212, 0.34)',
-      breathEdge: 'rgba(6, 182, 212, 0.88)',
-      playhead: '#f97316',
+      playhead: 'rgba(249, 115, 22, 0.38)',
     };
     const normalizeTimelineMode = TimelineView.normalizeTimelineMode || (value => value === 'strip' ? 'strip' : 'overlay');
-    const resolveWaveTheme = TimelineView.resolveWaveTheme || (key => {
-      const themes = TimelineView.WAVE_THEMES || {};
-      const safeKey = themes[key] ? key : 'cool';
-      return { key: safeKey, theme: themes[safeKey] || {} };
-    });
     const timelineModeKey = TimelineView.TIMELINE_MODE_KEY || 'reviewTimelineMode';
     let timelineMode = normalizeTimelineMode(localStorage.getItem(timelineModeKey));
     let currentProject = null;
     let currentTrackCount = 0;
     let projectAssetsById = new Map();
     let waveReady = false;
-    let clipWaveformRaf = null;
 
     loadingOverlay.classList.add('show');
     const loadingMessages = ['正在加载字幕数据...', '正在解析音频波形...', '正在准备播放器...', '即将就绪...'];
@@ -63,6 +57,15 @@ let words = [];
 
     const fetchJSON = (url) => fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
     const PROJECT_LABEL_W = 68;
+    const WAVE_COL = {
+      bg: '#0E0E13',
+      wave: '#8CA0C8',
+      waveSoft: 'rgba(140,160,200,0.36)',
+      center: '#23252E',
+      clipWave: 'rgba(80,198,236,.70)',
+      clipWaveEdge: 'rgba(180,226,244,.42)',
+    };
+    let clipWaveformRaf = 0;
 
     function escapeHtml(value) {
       return String(value == null ? '' : value)
@@ -70,6 +73,158 @@ let words = [];
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+    }
+
+    function numValue(value, fallback = 0) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : fallback;
+    }
+
+    function clampValue(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function percentile(values, ratio) {
+      if (!values.length) return 0;
+      const sorted = Array.from(values).sort((a, b) => a - b);
+      const index = clampValue(Math.floor((sorted.length - 1) * ratio), 0, sorted.length - 1);
+      return sorted[index] || 0;
+    }
+
+    function envelopeForPeaks(peaks, assetDuration, sourceStart, sourceDuration, width) {
+      const size = Math.max(1, Math.floor(width));
+      const envelope = new Float32Array(size);
+      if (!Array.isArray(peaks) || peaks.length < 2 || !(assetDuration > 0) || !(sourceDuration > 0)) return envelope;
+
+      const safeStart = clampValue(numValue(sourceStart), 0, assetDuration);
+      const safeEnd = clampValue(safeStart + numValue(sourceDuration), safeStart, assetDuration);
+      const startIndex = (safeStart / assetDuration) * peaks.length;
+      const endIndex = Math.max(startIndex + 1, (safeEnd / assetDuration) * peaks.length);
+      const sourceLength = Math.max(1, endIndex - startIndex);
+
+      for (let x = 0; x < size; x++) {
+        const bucketStart = startIndex + (x / size) * sourceLength;
+        const bucketEnd = startIndex + ((x + 1) / size) * sourceLength;
+        const from = clampValue(Math.floor(bucketStart), 0, peaks.length - 1);
+        const to = clampValue(Math.ceil(bucketEnd), from + 1, peaks.length);
+        let peak = 0;
+        if (to - from <= 1) {
+          const left = clampValue(from, 0, peaks.length - 1);
+          const right = clampValue(left + 1, 0, peaks.length - 1);
+          const mix = bucketStart - Math.floor(bucketStart);
+          peak = (Math.abs(numValue(peaks[left])) * (1 - mix)) + (Math.abs(numValue(peaks[right])) * mix);
+        } else {
+          for (let i = from; i < to; i++) peak = Math.max(peak, Math.abs(numValue(peaks[i])));
+        }
+        envelope[x] = Math.min(1, peak);
+      }
+
+      const floor = percentile(envelope, 0.08);
+      const ceiling = Math.max(percentile(envelope, 0.985), floor + 0.01);
+      for (let x = 0; x < envelope.length; x++) {
+        const normalized = clampValue((envelope[x] - floor) / (ceiling - floor), 0, 1);
+        envelope[x] = Math.pow(normalized, 1.18);
+      }
+      return envelope;
+    }
+
+    function paintUpperWaveform(ctx, opts) {
+      const x = numValue(opts.x);
+      const y = numValue(opts.y);
+      const width = Math.max(1, Math.floor(numValue(opts.width)));
+      const height = Math.max(1, Math.floor(numValue(opts.height)));
+      const peaks = opts.peaks || [];
+      const assetDuration = numValue(opts.assetDuration);
+      const sourceStart = numValue(opts.sourceStart);
+      const sourceDuration = numValue(opts.sourceDuration, assetDuration);
+      const baseline = y + height - 1;
+
+      if (!Array.isArray(peaks) || peaks.length < 2 || !(assetDuration > 0) || !(sourceDuration > 0)) {
+        ctx.fillStyle = opts.center || WAVE_COL.center;
+        ctx.fillRect(x, baseline - 0.5, width, 1);
+        return;
+      }
+
+      const envelope = envelopeForPeaks(peaks, assetDuration, sourceStart, sourceDuration, width);
+      ctx.fillStyle = opts.fill || WAVE_COL.waveSoft;
+      ctx.beginPath();
+      ctx.moveTo(x, baseline);
+      for (let i = 0; i < envelope.length; i++) {
+        const h = Math.max(0.8, envelope[i] * Math.max(1, height - 2));
+        ctx.lineTo(x + i, baseline - h);
+      }
+      ctx.lineTo(x + width, baseline);
+      ctx.closePath();
+      ctx.fill();
+
+      if (opts.stroke) {
+        ctx.strokeStyle = opts.stroke;
+        ctx.beginPath();
+        for (let i = 0; i < envelope.length; i++) {
+          const h = Math.max(0.8, envelope[i] * Math.max(1, height - 2));
+          const py = baseline - h;
+          if (i === 0) ctx.moveTo(x + i, py);
+          else ctx.lineTo(x + i, py);
+        }
+        ctx.stroke();
+      }
+    }
+
+    function drawWaveformCanvas(canvas, peaks, sourceStart, sourceDuration, assetDuration, colors = {}) {
+      const rect = canvas.getBoundingClientRect();
+      const width = Math.max(1, Math.floor(rect.width));
+      const height = Math.max(1, Math.floor(rect.height));
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(width * ratio);
+      canvas.height = Math.floor(height * ratio);
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      paintUpperWaveform(ctx, {
+        peaks,
+        assetDuration,
+        sourceStart,
+        sourceDuration,
+        x: 0,
+        y: 1,
+        width,
+        height: Math.max(1, height - 2),
+        fill: colors.fill || WAVE_COL.clipWave,
+        stroke: colors.stroke || WAVE_COL.clipWaveEdge,
+        center: colors.center || 'rgba(180,226,244,.34)',
+      });
+    }
+
+    function drawProjectClipWaveforms() {
+      clipWaveformRaf = 0;
+      document.querySelectorAll('#projectTracks canvas.clip-waveform').forEach((canvas) => {
+        const asset = projectAssetsById.get(canvas.dataset.assetId);
+        if (!asset || asset.hasAudio === false) return;
+        const visibleDuration = numValue(canvas.dataset.duration);
+        const assetDuration = numValue(asset.duration) > 0 ? numValue(asset.duration) : visibleDuration;
+        drawWaveformCanvas(
+          canvas,
+          asset.waveform,
+          numValue(canvas.dataset.sourceStart),
+          visibleDuration,
+          assetDuration
+        );
+      });
+    }
+
+    function scheduleProjectClipWaveforms() {
+      if (clipWaveformRaf) return;
+      clipWaveformRaf = requestAnimationFrame(drawProjectClipWaveforms);
+    }
+
+    function syncLegendColors() {
+      const setSw = (id, color) => {
+        const el = document.getElementById(id);
+        if (el) el.style.background = color;
+      };
+      setSw('lg-normal', WAVE_COL.wave);
+      setSw('lg-del', STATUS_COL.delete);
+      setSw('lg-breath', STATUS_COL.breath);
     }
 
     fetch('./data.json')
@@ -96,7 +251,11 @@ let words = [];
         ]);
         peaksData = (pk && Array.isArray(pk.peaks)) ? pk : null;
         silencePeriods = Array.isArray(sp) ? sp.slice().sort((a, b) => a.start - b.start) : [];
+        breathSegments = TimelineView.selectableBreathSegments
+          ? TimelineView.selectableBreathSegments(words)
+          : words.filter(w => w && w.isGap && w.end > w.start).map(w => ({ start: w.start, end: w.end }));
         currentProjectSignature = draftResp && draftResp.projectSignature ? draftResp.projectSignature : null;
+        reviewDir = projectResp && projectResp.reviewDir ? projectResp.reviewDir : '';
         renderProjectSummary((projectResp && projectResp.project) || data.project || data.timeline);
         const restored = applyDraft(draftResp && draftResp.draft);
 
@@ -111,7 +270,7 @@ let words = [];
         clearInterval(msgTimer);
         render();
         initKnobs();
-        initThemeSwitcher();
+        syncLegendColors();
       })
       .catch(err => {
         clearInterval(msgTimer);
@@ -128,7 +287,9 @@ let words = [];
         (TimelineView.trackCountForProject ? TimelineView.trackCountForProject(project) : 0),
         1
       );
-      el.textContent = `多轨 ${project.assets.length} 素材 / ${currentTrackCount || 1} 轨`;
+      const transcriptStale = project.transcript && project.transcript.status === 'stale';
+      el.textContent = `多轨 ${project.assets.length} 素材 / ${currentTrackCount || 1} 轨${transcriptStale ? ' · 需重转录' : ''}`;
+      el.classList.toggle('stale', transcriptStale);
       renderProjectTracks();
     }
 
@@ -161,6 +322,7 @@ let words = [];
       const viewEnd = view.viewStart + view.viewDuration;
       const rootWidth = Math.max(1, root.clientWidth || view.width || 1);
       const rows = [];
+      root.style.setProperty('--track-count', String(Math.max(1, currentTrackCount || 1)));
       for (let t = 0; t < currentTrackCount; t++) {
         const clips = currentProject.clips
           .filter(clip => Number(clip.trackIndex != null ? clip.trackIndex : clip.lane || 0) === t)
@@ -169,23 +331,26 @@ let words = [];
             const clipEnd = clipStart + Number(clip.duration || 0);
             if (clipEnd <= view.viewStart || clipStart >= viewEnd) return '';
             const asset = projectAssetsById.get(clip.assetId) || { id: clip.assetId, name: 'missing', kind: 'audio' };
-            const left = view.labelWidth + (Math.max(clipStart, view.viewStart) - view.viewStart) * view.pxPerSec;
-            const right = view.labelWidth + (Math.min(clipEnd, viewEnd) - view.viewStart) * view.pxPerSec;
+            const visibleStart = Math.max(clipStart, view.viewStart);
+            const visibleEnd = Math.min(clipEnd, viewEnd);
+            const left = view.labelWidth + (visibleStart - view.viewStart) * view.pxPerSec;
+            const right = view.labelWidth + (visibleEnd - view.viewStart) * view.pxPerSec;
             const width = Math.max(18, Math.min(rootWidth - left + 4, right - left));
             const kind = asset.kind === 'video' || asset.hasVideo ? 'video' : 'audio';
+            const sourceStart = Number(clip.sourceStart || 0) + (visibleStart - clipStart);
+            const visibleDuration = Math.max(0.001, visibleEnd - visibleStart);
             const title = `${asset.name || asset.id} · ${formatTime(clipStart)}-${formatTime(clipEnd)} · 源 ${formatTime(Number(clip.sourceStart || 0))}`;
-            const waveform = asset.hasAudio !== false
-              ? `<canvas class="clip-waveform" data-clip-id="${escapeHtml(clip.id)}"></canvas>`
-              : '';
+            const waveformCanvas = asset.hasAudio === false ? '' : `<canvas class="clip-waveform" data-clip-id="${escapeHtml(clip.id)}" data-asset-id="${escapeHtml(asset.id)}" data-source-start="${sourceStart}" data-duration="${visibleDuration}"></canvas>`;
             return `<div class="project-clip ${kind}" data-clip-id="${escapeHtml(clip.id)}" data-asset-id="${escapeHtml(asset.id)}" title="${escapeHtml(title)}" style="left:${left}px;width:${width}px">
-              <span class="clip-title">${escapeHtml(asset.name || asset.id)}</span>${waveform}
+              ${waveformCanvas}
+              <span class="clip-title">${escapeHtml(asset.name || asset.id)}</span>
             </div>`;
           }).join('');
         rows.push(`<div class="project-track"><div class="project-track-label">轨 ${t + 1}</div>${clips}</div>`);
       }
       root.innerHTML = rows.join('');
       root.style.display = rows.length ? 'block' : 'none';
-      scheduleProjectWaveformDraw();
+      scheduleProjectClipWaveforms();
     }
 
     function togglePlay()  { clearPreview(); video.paused ? video.play() : video.pause(); }
@@ -196,143 +361,6 @@ let words = [];
     // 波形渲染器（自绘 canvas）：视口窗口化渲染，长视频也顺滑
     // 状态带：青蓝=气口 / 红=删减；正常内容保持 clip 与波形原色
     // ============================================================
-    // 波形配色主题（主题只影响普通波形，不影响删减/气口/播放头语义色）
-    const WAVE_THEMES = TimelineView.WAVE_THEMES || {
-      cool: {
-        name: '冷调蓝白',
-        bg: '#0E0E13',
-        wave: '#8CA0C8',
-        waveSoft: 'rgba(140,160,200,0.36)',
-        center: '#23252E',
-        clipWave: 'rgba(80,198,236,.78)',
-        clipWaveEdge: 'rgba(180,226,244,.48)',
-      },
-    };
-    const WAVE_THEME_KEY = TimelineView.WAVE_THEME_KEY || 'reviewWaveTheme';
-    let currentThemeKey = 'cool';
-    let COL = WAVE_THEMES.cool;
-    (function () {
-      const saved = localStorage.getItem(WAVE_THEME_KEY);
-      const resolved = resolveWaveTheme(saved);
-      currentThemeKey = resolved.key;
-      COL = resolved.theme;
-    })();
-
-    const ClipWaveformRenderer = {
-      percentile(values, ratio) {
-        if (!values.length) return 0;
-        const sorted = Array.from(values).sort((a, b) => a - b);
-        const index = (TimelineView.clamp || ((v, min, max) => Math.max(min, Math.min(max, v))))(
-          Math.floor((sorted.length - 1) * ratio),
-          0,
-          sorted.length - 1
-        );
-        return sorted[index] || 0;
-      },
-
-      draw(canvas, peaks, clip, assetDuration) {
-        const rect = canvas.getBoundingClientRect();
-        const width = Math.max(1, Math.floor(rect.width));
-        const height = Math.max(1, Math.floor(rect.height));
-        const ratio = window.devicePixelRatio || 1;
-        canvas.width = Math.floor(width * ratio);
-        canvas.height = Math.floor(height * ratio);
-        const cctx = canvas.getContext('2d');
-        cctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-        cctx.clearRect(0, 0, width, height);
-
-        if (!Array.isArray(peaks) || peaks.length < 2 || !(assetDuration > 0)) return;
-
-        const clamp = TimelineView.clamp || ((v, min, max) => Math.max(min, Math.min(max, v)));
-        const num = TimelineView.num || ((value, fallback = 0) => {
-          const n = Number(value);
-          return Number.isFinite(n) ? n : fallback;
-        });
-        const baseline = height - 1;
-        const sourceStart = clamp(num(clip.sourceStart), 0, assetDuration);
-        const sourceEnd = clamp(sourceStart + num(clip.duration), sourceStart, assetDuration);
-        const startIndex = (sourceStart / assetDuration) * peaks.length;
-        const endIndex = Math.max(startIndex + 1, (sourceEnd / assetDuration) * peaks.length);
-        const sourceLength = Math.max(1, endIndex - startIndex);
-        const envelope = new Float32Array(width);
-
-        for (let x = 0; x < width; x++) {
-          const bucketStart = startIndex + (x / width) * sourceLength;
-          const bucketEnd = startIndex + ((x + 1) / width) * sourceLength;
-          const from = clamp(Math.floor(bucketStart), 0, peaks.length - 1);
-          const to = clamp(Math.ceil(bucketEnd), from + 1, peaks.length);
-          let peak = 0;
-          if (to - from <= 1) {
-            const left = Math.max(0, Math.min(peaks.length - 1, from));
-            const right = Math.max(0, Math.min(peaks.length - 1, left + 1));
-            const mix = bucketStart - Math.floor(bucketStart);
-            peak = (Math.abs(Number(peaks[left]) || 0) * (1 - mix)) + (Math.abs(Number(peaks[right]) || 0) * mix);
-          } else {
-            for (let i = from; i < to; i++) peak = Math.max(peak, Math.abs(Number(peaks[i]) || 0));
-          }
-          envelope[x] = Math.min(1, peak);
-        }
-
-        const floor = this.percentile(envelope, 0.08);
-        const ceiling = Math.max(this.percentile(envelope, 0.985), floor + 0.01);
-        for (let x = 0; x < width; x++) {
-          const normalized = clamp((envelope[x] - floor) / (ceiling - floor), 0, 1);
-          envelope[x] = Math.pow(normalized, 1.18);
-        }
-
-        cctx.fillStyle = COL.clipWave || COL.wave;
-        cctx.beginPath();
-        cctx.moveTo(0, baseline);
-        for (let x = 0; x < width; x++) {
-          const y = baseline - Math.max(0, envelope[x] * (height - 2));
-          cctx.lineTo(x, y);
-        }
-        cctx.lineTo(width, baseline);
-        cctx.closePath();
-        cctx.fill();
-
-        cctx.strokeStyle = COL.clipWaveEdge || COL.waveSoft || COL.wave;
-        cctx.beginPath();
-        for (let x = 0; x < width; x++) {
-          const y = baseline - Math.max(0, envelope[x] * (height - 2));
-          if (x === 0) cctx.moveTo(x, y);
-          else cctx.lineTo(x, y);
-        }
-        cctx.stroke();
-      }
-    };
-
-    function drawProjectClipWaveforms() {
-      if (!currentProject) return;
-      const view = projectViewState();
-      const viewEnd = view.viewStart + view.viewDuration;
-      document.querySelectorAll('canvas.clip-waveform').forEach((canvas) => {
-        const clip = currentProject.clips.find(item => item.id === canvas.dataset.clipId);
-        const asset = clip ? projectAssetsById.get(clip.assetId) : null;
-        const visible = clip && TimelineView.clipVisibleSourceWindow
-          ? TimelineView.clipVisibleSourceWindow({ clip, viewStart: view.viewStart, viewEnd })
-          : null;
-        if (!clip || !asset || !visible || !Array.isArray(asset.waveform) || asset.waveform.length < 2) {
-          canvas.style.display = 'none';
-          return;
-        }
-        canvas.style.display = 'block';
-        ClipWaveformRenderer.draw(canvas, asset.waveform, {
-          ...clip,
-          sourceStart: visible.sourceStart,
-          duration: visible.duration,
-        }, Number(asset.duration || clip.duration || 0));
-      });
-    }
-
-    function scheduleProjectWaveformDraw() {
-      if (clipWaveformRaf) return;
-      clipWaveformRaf = requestAnimationFrame(() => {
-        clipWaveformRaf = null;
-        drawProjectClipWaveforms();
-      });
-    }
-
     const wave = (function () {
       let root, cv, ctx, buf, bctx, rcv, rctx, dpr = 1;
       let cssW = 0, cssH = 132, rulerH = 20;
@@ -342,16 +370,7 @@ let words = [];
       let cutsDirty = true; // 切割几何（选段/参数）是否需要重算；与视口平移/缩放无关
       let deleteSegs = [];
       let drag = null;
-      let gain = 1; // 波形归一化增益：把全局峰值拉到接近满高（像剪映/FCP 那样自适应填满）
       const ZOOM_MAX = 400; // 相对 fit 的最大放大倍数
-
-      // 计算归一化增益：全局最大峰值映射到 ~0.92 半高；安静录音也能填满面板
-      function computeGain() {
-        const pk = peaksData ? peaksData.peaks : null;
-        let mx = 0;
-        if (pk) for (let i = 0; i < pk.length; i++) if (pk[i] > mx) mx = pk[i];
-        gain = mx > 0.0001 ? 0.92 / mx : 1;
-      }
 
       const timelineWidth = () => Math.max(1, cssW - PROJECT_LABEL_W);
       const timeToX = (t) => PROJECT_LABEL_W + (t - viewStart) * pxPerSec;
@@ -416,78 +435,46 @@ let words = [];
         }
       }
 
-      function peakAt(i0, i1, peaks, n) {
-        let m = 0;
-        const a = Math.max(0, i0 | 0), b = Math.min(n - 1, i1 | 0);
-        for (let i = a; i <= b; i++) if (peaks[i] > m) m = peaks[i];
-        return m;
-      }
-
       function buildStatic() {
         bctx.clearRect(0, 0, cssW, cssH);
         if (timelineMode === 'strip') {
-          bctx.fillStyle = COL.bg || '#0E0E13';
+          bctx.fillStyle = WAVE_COL.bg;
           bctx.fillRect(0, 0, cssW, cssH);
           bctx.fillStyle = 'rgba(14,14,19,.9)';
           bctx.fillRect(0, 0, PROJECT_LABEL_W, cssH);
           bctx.fillStyle = 'rgba(255,255,255,.1)';
           bctx.fillRect(PROJECT_LABEL_W - 0.5, 0, 1, cssH);
-        } else {
           drawMixedWaveform();
         }
 
-        drawBand(silencePeriods, STATUS_COL.breath, STATUS_COL.breathEdge);
-        drawBand(deleteSegs, STATUS_COL.delete, STATUS_COL.deleteEdge);
+        drawBand(breathSegments, STATUS_COL.breath);
+        drawBand(deleteSegs, STATUS_COL.delete);
       }
 
       function drawMixedWaveform() {
-        const mid = cssH / 2;
         const peaks = peaksData ? peaksData.peaks : null;
-        const n = peaks ? peaks.length : 0;
-        if (peaks && n > 1 && duration > 0) {
-          const samplesPerSec = n / duration;
-          const maxH = Math.max(8, cssH - 10);
-          const amp = new Float32Array(Math.max(1, cssW - PROJECT_LABEL_W));
-          for (let i = 0; i < amp.length; i++) {
-            const x = PROJECT_LABEL_W + i;
-            const sa = xToTime(x) * samplesPerSec, sb = xToTime(x + 1) * samplesPerSec;
-            if (sb - sa >= 1) {
-              amp[i] = peakAt(sa, sb, peaks, n);
-            } else {
-              const f = Math.max(0, Math.min(n - 1, (sa + sb) / 2));
-              const idx = f | 0, fr = f - idx;
-              amp[i] = (peaks[idx] || 0) * (1 - fr) + (peaks[Math.min(n - 1, idx + 1)] || 0) * fr;
-            }
-          }
-          const hAt = (i) => {
-            const a = i > 0 ? amp[i - 1] : amp[i];
-            const c = i < amp.length - 1 ? amp[i + 1] : amp[i];
-            const v = (a + amp[i] * 2 + c) / 4;
-            return Math.max(0.6, Math.min(1, v * gain) * maxH / 2);
-          };
-          bctx.fillStyle = COL.waveSoft || COL.wave;
-          bctx.beginPath();
-          bctx.moveTo(PROJECT_LABEL_W, mid - hAt(0));
-          for (let i = 1; i < amp.length; i++) bctx.lineTo(PROJECT_LABEL_W + i, mid - hAt(i));
-          for (let i = amp.length - 1; i >= 0; i--) bctx.lineTo(PROJECT_LABEL_W + i, mid + hAt(i));
-          bctx.closePath();
-          bctx.fill();
-        } else {
-          bctx.fillStyle = COL.center || 'rgba(255,255,255,.16)';
-          bctx.fillRect(PROJECT_LABEL_W, mid - 0.5, Math.max(1, cssW - PROJECT_LABEL_W), 1);
-        }
+        paintUpperWaveform(bctx, {
+          peaks,
+          assetDuration: duration,
+          sourceStart: viewStart,
+          sourceDuration: viewDur(),
+          x: PROJECT_LABEL_W,
+          y: 4,
+          width: Math.max(1, cssW - PROJECT_LABEL_W),
+          height: Math.max(1, cssH - 8),
+          fill: WAVE_COL.waveSoft,
+          stroke: WAVE_COL.wave,
+          center: WAVE_COL.center,
+        });
       }
 
-      function drawBand(segs, fill, edge) {
+      function drawBand(segs, fill) {
         for (const s of segs) {
           const x0Raw = timeToX(s.start), x1 = timeToX(s.end);
           if (x1 < PROJECT_LABEL_W || x0Raw > cssW) continue;
           const x0 = Math.max(PROJECT_LABEL_W, x0Raw);
           const w = Math.max(1.5, x1 - x0);
           bctx.fillStyle = fill; bctx.fillRect(x0, 0, w, cssH);
-          bctx.fillStyle = edge;
-          bctx.fillRect(x0, 0, 1.5, cssH);
-          bctx.fillRect(x0 + w - 1.5, 0, 1.5, cssH);
         }
       }
 
@@ -580,7 +567,6 @@ let words = [];
         bctx = buf.getContext('2d');
         rctx = rcv ? rcv.getContext('2d') : null;
         duration = Math.max((peaksData && peaksData.duration) || 0, video.duration || 0, projectTimelineDuration());
-        computeGain();
         layout();
         pxPerSec = fitPxPerSec();
         viewStart = 0;
@@ -669,35 +655,6 @@ let words = [];
       switcher.querySelectorAll('[data-mode]').forEach((button) => {
         button.addEventListener('click', () => setTimelineMode(button.dataset.mode, true));
       });
-    }
-
-    // 波形配色：实时切换 + 同步图例色块 + 持久化
-    function applyWaveTheme(key, persist) {
-      const resolved = resolveWaveTheme(key);
-      currentThemeKey = resolved.key;
-      COL = resolved.theme;
-      const setSw = (id, c) => { const el = document.getElementById(id); if (el) el.style.background = c; };
-      setSw('lg-normal', COL.wave || COL.clipWave || '#8CA0C8');
-      setSw('lg-del', STATUS_COL.deleteEdge || STATUS_COL.delete);
-      setSw('lg-breath', STATUS_COL.breathEdge || STATUS_COL.breath);
-      if (persist || key !== currentThemeKey) {
-        try { localStorage.setItem(WAVE_THEME_KEY, currentThemeKey); } catch (e) {}
-      }
-      const sel = document.getElementById('themeSelect');
-      if (sel && sel.value !== currentThemeKey) sel.value = currentThemeKey;
-      if (typeof wave !== 'undefined') wave.redraw(); // redraw 已重建静态层，无需再 markDirty
-      renderProjectTracks();
-      scheduleProjectWaveformDraw();
-    }
-    function initThemeSwitcher() {
-      const sel = document.getElementById('themeSelect');
-      if (!sel) return;
-      const current = resolveWaveTheme(localStorage.getItem(WAVE_THEME_KEY)).key;
-      sel.innerHTML = Object.keys(WAVE_THEMES)
-        .map(k => `<option value="${k}"${k === current ? ' selected' : ''}>${WAVE_THEMES[k].name}</option>`)
-        .join('');
-      sel.addEventListener('change', () => applyWaveTheme(sel.value, true));
-      applyWaveTheme(current, false); // 同步图例色块到当前主题
     }
 
     // 切割参数滑块：导出时一并发给 server，预览和导出使用同一套切点参数
@@ -1344,6 +1301,41 @@ let words = [];
       return data;
     }
 
+    function distributionHandoffPrompt(fileName) {
+      const targetDir = reviewDir || '当前审核目录（3_审核）';
+      return `使用 AI剪口播 skill，完成这个项目的审核包交付：\n${targetDir}\n\n审核页已经导出 ${fileName}。请创建“打包并分发审核页”任务，运行 package_review.sh，生成轻量、自包含的审核包目录和 ZIP；确认多轨原始素材已归档、项目 JSON 不含 waveform 大数组，然后把审核包路径交付给我。`;
+    }
+
+    function showDistributionHandoff(title, summary, fileName) {
+      document.getElementById('distributionTitle').textContent = title;
+      document.getElementById('distributionSummary').textContent = summary;
+      document.getElementById('distributionPrompt').value = distributionHandoffPrompt(fileName);
+      document.getElementById('copyDistributionBtn').textContent = '复制提示词';
+      document.getElementById('distributionModal').hidden = false;
+      document.getElementById('copyDistributionBtn').focus();
+    }
+
+    function hideDistributionHandoff() {
+      document.getElementById('distributionModal').hidden = true;
+    }
+
+    async function copyDistributionHandoff() {
+      const field = document.getElementById('distributionPrompt');
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(field.value);
+        } else {
+          field.focus();
+          field.select();
+          document.execCommand('copy');
+        }
+        document.getElementById('copyDistributionBtn').textContent = '已复制';
+      } catch (err) {
+        field.focus();
+        field.select();
+      }
+    }
+
     function formatDuration(seconds) {
       if (!Number.isFinite(Number(seconds))) return '--:--';
       const s = Math.max(0, Math.round(Number(seconds)));
@@ -1413,7 +1405,7 @@ let words = [];
       try {
         const data = await postExport('/api/fcpxml', buildExportPayload());
         const fileName = await downloadOutput(data.output);
-        alert(`✅ FCPXML 已导出\n\n📁 文件: ${fileName}\n🎬 保留片段: ${data.segments} 个\n\n直接拖入 Final Cut Pro 即可`);
+        showDistributionHandoff('FCPXML 已导出', `文件：${fileName} · 保留片段：${data.segments} 个`, fileName);
       } catch (err) {
         alert('❌ 请求失败: ' + err.message + '\n\n请确保使用 review_server.js 启动服务');
       }
@@ -1431,7 +1423,7 @@ let words = [];
         }
         const output = (job && job.output) || data.output;
         const fileName = await downloadOutput(output);
-        alert(`✅ 音频已导出\n\n📁 文件: ${fileName}\n🎚️ 码率: ${(job && job.bitrate) || data.bitrate}\n🎬 保留片段: ${(job && job.segments) || data.segments} 个`);
+        showDistributionHandoff('音频已导出', `文件：${fileName} · 码率：${(job && job.bitrate) || data.bitrate} · 保留片段：${(job && job.segments) || data.segments} 个`, fileName);
       } catch (err) {
         hideExportProgress();
         alert('❌ 音频导出失败: ' + err.message + '\n\n请确保已安装 ffmpeg，并使用 review_server.js 启动服务');
@@ -1443,7 +1435,7 @@ let words = [];
       try {
         const data = await postExport('/api/srt', buildExportPayload());
         const fileName = await downloadOutput(data.output);
-        alert(`✅ SRT 已导出\n\n📁 文件: ${fileName}\n📝 字幕条数: ${data.cues} 条`);
+        showDistributionHandoff('SRT 已导出', `文件：${fileName} · 字幕：${data.cues} 条`, fileName);
       } catch (err) {
         alert('❌ SRT 导出失败: ' + err.message + '\n\n请确保使用 review_server.js 启动服务');
       }

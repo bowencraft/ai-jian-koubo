@@ -182,10 +182,9 @@
         <span class="sstat sstat-final">剪后 <b id="tl-final">--:--</b></span>
         <div class="tl-zoom">
           <div class="timeline-mode-switch" id="timelineModeSwitch" role="group" aria-label="时间线显示模式">
-            <button type="button" data-mode="overlay">叠加波形</button>
-            <button type="button" data-mode="strip">裁切条</button>
+            <button type="button" data-mode="overlay">叠加模式</button>
+            <button type="button" data-mode="strip">独立模式</button>
           </div>
-          <select id="themeSelect" title="波形配色"></select>
           <button onclick="waveZoom(1/1.6)" title="缩小">−</button>
           <input type="range" id="zoomSlider" min="0" max="1000" value="0" title="缩放">
           <button onclick="waveZoom(1.6)" title="放大">+</button>
@@ -196,6 +195,20 @@
       <div id="waveform">
         <div class="project-tracks" id="projectTracks"></div>
         <canvas id="waveCanvas"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="handoff-modal" id="distributionModal" hidden role="dialog" aria-modal="true" aria-labelledby="distributionTitle">
+    <div class="handoff-card">
+      <span class="handoff-kicker">/ EXPORT COMPLETE</span>
+      <h2 id="distributionTitle">导出完成</h2>
+      <p id="distributionSummary"></p>
+      <label for="distributionPrompt">交给 AI 的提示词</label>
+      <textarea id="distributionPrompt" readonly></textarea>
+      <div class="handoff-actions">
+        <button class="ghost" onclick="hideDistributionHandoff()">关闭</button>
+        <button class="primary" id="copyDistributionBtn" onclick="copyDistributionHandoff()">复制提示词</button>
       </div>
     </div>
   </div>

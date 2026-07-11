@@ -22,6 +22,7 @@
     padFrames: 2 / 30,       // 吸附后给说话者留的喘气余量（秒）
     edgeMargin: 0.05,        // 保留段边缘此范围内的静音不算「内部静音」
     minInternalSilence: 0.2, // 保留段内部 ≥ 此长度的静音会被二次切掉（换气/未识别停顿）
+    trimInternalSilence: true,
   };
 
   // 在 (rawStart, windowEnd] 内找最近的静音终点（最小 end），用于裁保留段开头
@@ -93,6 +94,8 @@
 
     // 3) 保留段内部长静音二次切割
     const finalKeeps = [];
+    if (o.trimInternalSilence === false) return keepSegments;
+
     for (const keep of keepSegments) {
       const internal = periods.filter(sp =>
         sp.start > keep.start + o.edgeMargin &&

@@ -51,6 +51,16 @@ button:disabled { opacity: .42; cursor: default; }
   line-height: 1;
 }
 .icon-btn i, .tool i { font-size: 13px; pointer-events: none; }
+.ui-icon {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
 .icon-btn.mini {
   width: 24px;
   height: 22px;
@@ -107,6 +117,53 @@ button:disabled { opacity: .42; cursor: default; }
   white-space: nowrap;
   pointer-events: none;
   box-shadow: 0 10px 24px rgba(0,0,0,.42);
+}
+.handoff-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(5, 5, 8, .72);
+}
+.handoff-modal[hidden] { display: none; }
+.handoff-card {
+  width: min(560px, 100%);
+  padding: 22px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #11131b;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .52);
+}
+.handoff-card h2 {
+  margin: 5px 0 7px;
+  font-size: 19px;
+  letter-spacing: 0;
+}
+.handoff-card p {
+  margin: 0 0 14px;
+  color: var(--paper-2);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.handoff-card textarea {
+  width: 100%;
+  min-height: 150px;
+  resize: vertical;
+  padding: 11px;
+  border-color: var(--line-strong);
+  background: #090a0f;
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.handoff-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
 }
 input, select { width: 100%; padding: 4px 7px; }
 label {

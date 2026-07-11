@@ -18,15 +18,15 @@ NODE_BIN="$(command -v node || true)"
 [ -n "$NODE_BIN" ] || { echo "❌ 找不到 node，请先安装"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-copy_if_missing() {
+sync_template() {
   local src="$1"
   local dst="$2"
-  [ -f "$dst" ] || cp "$src" "$dst"
+  cp "$src" "$dst"
 }
 
-copy_if_missing "$SCRIPT_DIR/templates/editor.html" "$PROJECT_DIR/editor.html"
-copy_if_missing "$SCRIPT_DIR/templates/editor.css" "$PROJECT_DIR/editor.css"
-copy_if_missing "$SCRIPT_DIR/templates/editor.js" "$PROJECT_DIR/editor.js"
+sync_template "$SCRIPT_DIR/templates/editor.html" "$PROJECT_DIR/editor.html"
+sync_template "$SCRIPT_DIR/templates/editor.css" "$PROJECT_DIR/editor.css"
+sync_template "$SCRIPT_DIR/templates/editor.js" "$PROJECT_DIR/editor.js"
 
 if [ ! -f "$PROJECT_DIR/project.json" ]; then
   cat > "$PROJECT_DIR/project.json" <<'JSON'

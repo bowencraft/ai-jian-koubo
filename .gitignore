@@ -22,3 +22,6 @@ test_video/
 
 # 系统垃圾
 .DS_Store
+
+# Superpowers 本地脑暴预览与临时服务器状态（正式设计文档在 docs/superpowers/）
+.superpowers/

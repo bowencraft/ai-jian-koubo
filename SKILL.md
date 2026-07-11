@@ -20,10 +20,12 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 ├── project.json  多轨项目（assets[] + clips[]；旧单素材项目会自动迁移生成）
 ├── 1_转录/   audio.mp3/review_mix.mp3 · volcengine_v3_result.json · subtitles_words.json
 ├── 2_分析/   analysis.txt · sentence_map.json · speech_errors.json · auto_selected.json
-└── 3_审核/   editor.html/css/js · review.html/css/js · project.json · media/ · audio.mp3 · data.json · silence_periods.json
+├── 3_审核/   editor.html/css/js · review.html/css/js · project.json · media/ · audio.mp3 · data.json · silence_periods.json
                 <视频名>_cut.fcpxml       ← 「导出为...」→ FCPXML，拖入剪映 / Final Cut Pro 完成最终剪辑
                 <视频名>_cut_128k.mp3     ← 「导出为...」→ 音频 MP3（96/128/192/256 kbps）
                 <视频名>_cut.srt          ← 「导出为...」→ SRT 字幕（按剪后时间轴重排）
+├── <项目名>_review_package_<时间>/      ← 可独立启动的便携审核包
+└── <项目名>_review_package_<时间>.zip   ← 可直接分发的审核包压缩文件
 ```
 
 **模式 B（转字幕）：**
@@ -49,6 +51,8 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
       操作：上传素材到当前项目；从素材库拖到轨道新增片段；可拖动、对齐、修剪、增删素材/轨道；可导入/导出项目 JSON
       预览规则：视频只预览当前时间最顶部有视频的轨道；音频轨道全部同步播放
       旧单素材项目：启动审核服务时自动迁移成 1 asset + 1 clip，可回编辑页继续改
+      人类完成后点右上角「完成编辑并交给 AI」：保存 + 标记 transcript=stale + 弹窗复制接力提示词
+      AI 收到提示词后，若当前环境支持 task/goal，先创建「转录与智能裁切」任务，再继续下面步骤
   1-4. 单素材用 run_transcribe.sh；多轨用 run_multitrack_transcribe.sh 先渲染 review_mix.mp3 再转录（自动）
   5.1 gen_analysis.js
   5.2 读规则.md + analysis.txt
@@ -60,8 +64,10 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
        审核页可见多轨摘要，但不能拖动/对齐/修剪素材；素材调整必须回 editor.html
   【等待用户确认】→ 网页点击「导出为...」→ 可选 FCPXML / 剪好音频 MP3 / 剪后 SRT
        导出的 FCPXML 引用原始多轨素材，而不是审核混音音频
-       （导出同时写 3_审核/review_log.json，供步骤 8 学习）
-  8. 自进化学习（用户显式触发「已导出，学一下」）→ diff 抽规则 → 确认 → 写 经验规则.md
+       （导出同时写 3_审核/review_log.json，供步骤 9 学习）
+       导出成功弹窗可复制「打包并分发审核页」接力提示词
+  8. AI 打包交付 → package_review.sh 收集原始素材、改写相对路径，生成便携目录 + ZIP
+  9. 自进化学习（用户显式触发「已导出，学一下」）→ diff 抽规则 → 确认 → 写 经验规则.md
 
 模式 B（转字幕）:
   B-1 提取纯文本
@@ -184,6 +190,13 @@ bash "$SKILL_DIR/scripts/run_multitrack_transcribe.sh" "$PROJECT_FILE" "$BASE_DI
 # 输出: BASE_DIR/1_转录/{review_mix.mp3, audio.mp3, volcengine_v3_result.json, subtitles_words.json}
 ```
 
+页面右上角「完成编辑并交给 AI」是人类与 agent 的正式交接点。它对首次项目和已生成审核页的旧项目都可用：
+
+- 首次项目：保存项目并标记为需要首次转录。
+- 已有审核项目：保存新时间线，刷新审核混音，并标记旧转录/智能裁切已过期。
+- 弹窗会生成包含 `project.json` 绝对路径的提示词。用户粘贴回来后，agent **必须以该文件为准**，不得沿用旧 `audio.mp3` 或旧转录结果。
+- 若 agent 支持 task / goal，收到接力提示后先创建「转录与智能裁切」任务；任务结束条件是审核数据生成完成并已打开审核页。
+
 后续步骤 5-7 与单素材一致。`generate_review.js` 会把 `BASE_DIR/project.json` 复制到 `3_审核/project.json`，审核服务器导出 FCPXML 时会引用原始多轨素材；导出音频/SRT 时会使用审核页正在播放的 `audio.mp3` 和同一套最终保留片段。
 
 ### 步骤 5: 生成分析文件 + 口误识别
@@ -199,7 +212,7 @@ node "$SKILL_DIR/scripts/gen_analysis.js" \
 
 #### 5.2 读取规则 + 分析文件
 
-读 `用户习惯/规则.md`、`用户习惯/经验规则.md`（自进化沉淀的个人偏好，见步骤 8）和 `analysis.txt`。
+读 `用户习惯/规则.md`、`用户习惯/经验规则.md`（自进化沉淀的个人偏好，见步骤 9）和 `analysis.txt`。
 两份规则都要遵守；冲突时以更具体、更新的为准。
 
 `analysis.txt` 格式（每行一句，序号: 文本）：
@@ -312,9 +325,33 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 
 > **导出时服务器同时写一份 `3_审核/review_log.json`**（与 FCPXML 同一次点击产出）：记录
 > AI 初选 idx、用户最终 idx、切割参数，以及二者**词级 diff**（带文字+句子上下文）。
-> 这是步骤 8「自进化学习」的唯一原料，**不读 `.fcpxml`**（那是算完的时间线，丢失了词级选择）。
+> 这是步骤 9「自进化学习」的唯一原料，**不读 `.fcpxml`**（那是算完的时间线，丢失了词级选择）。
 
-### 步骤 8: 自进化学习（用户显式触发）
+### 步骤 8: 打包与分发审核页
+
+审核页成功导出 FCPXML / MP3 / SRT 后，会弹出一段「打包并分发审核页」提示词。用户把它粘贴给 agent 后：
+
+1. 若环境支持 task / goal，创建「打包并分发审核页」任务。
+2. 运行：
+
+```bash
+bash "$SKILL_DIR/scripts/package_review.sh" \
+  "$BASE_DIR/3_审核"
+```
+
+3. 脚本会输出两行机器可读结果：
+
+```text
+PACKAGE_DIR=/.../<项目名>_review_package_<时间>
+PACKAGE_ARCHIVE=/.../<项目名>_review_package_<时间>.zip
+```
+
+4. 将 `PACKAGE_ARCHIVE` 作为分发文件交付，并同时告知 `PACKAGE_DIR` 便于本机直接检查。
+5. 完成前检查：包内 `project.json` / `data.json` 不含 waveform 数组；所有被 clip 引用的素材都在 `review/media/`；`start.command` / `start.sh` 能启动审核页。
+
+审核包会把项目素材改写成包内相对路径，因此换机器后仍能播放、继续审核并导出 FCPXML。若缺少被 clip 引用的源素材，脚本会直接失败，不会生成一个表面成功但不可用的包。
+
+### 步骤 9: 自进化学习（用户显式触发）
 
 > **不自动跑。** 用户导出后，在**任意会话**说「<项目> 已导出，学一下」之类，才执行本步。
 > 本步只读文件、不依赖对话上下文还在，所以冷会话也能跑。

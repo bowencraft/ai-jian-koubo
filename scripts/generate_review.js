@@ -9,7 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const { normalizeProject, stripProjectWaveforms } = require('./lib/timeline_project');
+const { normalizeProject, stripProjectWaveforms, markTranscriptReady } = require('./lib/timeline_project');
 
 const subtitlesFile = process.argv[2];
 const autoSelectedFile = process.argv[3];
@@ -120,7 +120,7 @@ if (fs.existsSync(parentMediaDir)) {
 if (fs.existsSync(projectFile)) {
   try {
     const rawProject = JSON.parse(fs.readFileSync(projectFile, 'utf8'));
-    const exchangeProject = stripProjectWaveforms(rawProject);
+    const exchangeProject = stripProjectWaveforms(markTranscriptReady(rawProject, { generatedAt: data.generatedAt }));
     fs.writeFileSync(projectFile, JSON.stringify(exchangeProject, null, 2));
     data.project = exchangeProject;
     data.timeline = buildTimelineSnapshot(exchangeProject, outDir);

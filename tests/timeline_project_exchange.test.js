@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { stripProjectWaveforms } = require('../scripts/lib/timeline_project');
+const { markTranscriptReady, stripProjectWaveforms } = require('../scripts/lib/timeline_project');
 
 const compact = stripProjectWaveforms({
   version: 1,
@@ -35,3 +35,15 @@ assert.strictEqual(compact.clips[0].timelineStart, 2);
 assert.strictEqual(compact.clips[0].sourceStart, 1);
 assert.strictEqual(compact.timeline.trackCount, 4);
 assert.strictEqual(compact.timeline.tracks[1].solo, true);
+
+const ready = markTranscriptReady({
+  ...compact,
+  transcript: {
+    status: 'stale',
+    reason: 'timeline edited by human',
+    markedAt: '2026-07-08T00:00:00.000Z',
+  },
+}, { generatedAt: '2026-07-08T01:00:00.000Z' });
+
+assert.strictEqual(ready.transcript.status, 'ready');
+assert.strictEqual(ready.transcript.generatedAt, '2026-07-08T01:00:00.000Z');

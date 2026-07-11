@@ -26,6 +26,9 @@ const {
 } = require('./lib/review_exports');
 const { createLegacyProject, normalizeProject, stripProjectWaveforms } = require('./lib/timeline_project');
 const { hashBuffer, findDuplicateAsset } = require('./lib/asset_dedupe');
+const { resolveReviewPlaybackFile } = require('./lib/review_media');
+const { renderTimelineAudio, timelineAudioSignature } = require('./lib/timeline_audio');
+const { writeReviewAudioAnalysis } = require('./lib/review_audio_analysis');
 
 const PORT = process.argv[2] || 8899;
 const VIDEO_FILE = process.argv[3];
@@ -65,6 +68,8 @@ const reviewDuration = reviewWords.reduce((max, w) => {
 
 const PROJECT_FILE = path.resolve('project.json');
 const WAVEFORM_CACHE_FILE = path.resolve('waveform_cache.json');
+const REVIEW_AUDIO_FILE = path.resolve('audio.mp3');
+const REVIEW_AUDIO_SIGNATURE_FILE = path.resolve('.review_audio_signature');
 
 function readWaveformCache() {
   try {
@@ -135,6 +140,70 @@ function writeProject(project) {
     updatedAt: new Date().toISOString(),
   }, null, 2));
   return normalized;
+}
+
+function readReviewAudioSignature() {
+  try {
+    return fs.readFileSync(REVIEW_AUDIO_SIGNATURE_FILE, 'utf8').trim();
+  } catch (err) {
+    return '';
+  }
+}
+
+function writeReviewAudioSignature(signature) {
+  fs.writeFileSync(REVIEW_AUDIO_SIGNATURE_FILE, signature + '\n');
+}
+
+function markTranscriptStale(project) {
+  const previous = project.transcript && typeof project.transcript === 'object' ? project.transcript : {};
+  if (previous.status === 'stale') return project;
+  return normalizeProject({
+    ...project,
+    transcript: {
+      ...previous,
+      status: 'stale',
+      reason: 'timeline audio changed',
+      markedAt: new Date().toISOString(),
+    },
+  });
+}
+
+function refreshReviewAudioIfNeeded(project, signature, { force = false } = {}) {
+  if (!reviewReady()) return { updated: false, skipped: 'review-not-ready' };
+  const storedSignature = readReviewAudioSignature();
+  const needsUpdate = force || !fs.existsSync(REVIEW_AUDIO_FILE) || storedSignature !== signature;
+  if (!needsUpdate) return { updated: false, skipped: 'current' };
+
+  const tmpAudio = path.resolve(`audio.tmp-${process.pid}-${Date.now()}.mp3`);
+  try {
+    renderTimelineAudio({
+      project,
+      outputFile: tmpAudio,
+      projectDir: process.cwd(),
+      stdio: 'pipe',
+    });
+    fs.renameSync(tmpAudio, REVIEW_AUDIO_FILE);
+    const analysis = writeReviewAudioAnalysis({
+      audioFile: REVIEW_AUDIO_FILE,
+      outputDir: process.cwd(),
+    });
+    silencePeriods = analysis.silencePeriods;
+    writeReviewAudioSignature(signature);
+    return {
+      updated: true,
+      file: path.basename(REVIEW_AUDIO_FILE),
+      peaksCount: analysis.peaksCount,
+      silenceCount: analysis.silencePeriods.length,
+      analysisWarning: analysis.silenceError || analysis.peaksError || null,
+    };
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpAudio)) fs.unlinkSync(tmpAudio);
+    } catch (_) {
+      // best effort cleanup for failed ffmpeg output
+    }
+    return { updated: false, error: err.message };
+  }
 }
 
 let timelineProject;
@@ -315,7 +384,14 @@ const server = http.createServer((req, res) => {
     try {
       timelineProject = readProject();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, project: timelineProject, reviewDuration, reviewReady: reviewReady() }));
+      res.end(JSON.stringify({
+        success: true,
+        project: timelineProject,
+        reviewDuration,
+        reviewReady: reviewReady(),
+        projectFile: PROJECT_FILE,
+        reviewDir: process.cwd(),
+      }));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: err.message }));
@@ -349,9 +425,25 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const parsed = JSON.parse(body || '{}');
-        timelineProject = writeProject(parsed.project || parsed);
+        const previousProject = timelineProject || (fs.existsSync(PROJECT_FILE) ? readProject() : null);
+        const beforeSignature = previousProject ? timelineAudioSignature(previousProject) : '';
+        let nextProject = normalizeProject(parsed.project || parsed);
+        const nextSignature = timelineAudioSignature(nextProject);
+        const transcriptStale = reviewReady() && beforeSignature && beforeSignature !== nextSignature;
+        if (transcriptStale) nextProject = markTranscriptStale(nextProject);
+        timelineProject = writeProject(nextProject);
+        const savedSignature = timelineAudioSignature(timelineProject);
+        const reviewAudio = refreshReviewAudioIfNeeded(timelineProject, savedSignature);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, project: timelineProject, reviewReady: reviewReady() }));
+        res.end(JSON.stringify({
+          success: true,
+          project: timelineProject,
+          reviewReady: reviewReady(),
+          reviewAudio,
+          transcriptStale,
+          projectFile: PROJECT_FILE,
+          reviewDir: process.cwd(),
+        }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: err.message }));
@@ -437,14 +529,15 @@ const server = http.createServer((req, res) => {
 
   // 视频文件代理（原始视频不在当前目录时使用）
   if (req.method === 'GET' && req.url.startsWith('/video')) {
-    if (!VIDEO_FILE || !fs.existsSync(VIDEO_FILE)) {
+    const playbackFile = resolveReviewPlaybackFile({ cwd: process.cwd(), videoFile: VIDEO_FILE });
+    if (!playbackFile) {
       res.writeHead(404);
       res.end('Video not found');
       return;
     }
-    const ext = path.extname(VIDEO_FILE).toLowerCase();
+    const ext = path.extname(playbackFile).toLowerCase();
     const contentType = MIME_TYPES[ext] || 'video/mp4';
-    streamFile(req, res, VIDEO_FILE, contentType);
+    streamFile(req, res, playbackFile, contentType);
     return;
   }
 
@@ -783,11 +876,13 @@ server.listen(PORT, () => {
   } catch (e) { /* 写不进不致命，地址下面也会打印 */ }
 
   // 输出机器可读的端口号，供 shell 捕获
+  const playbackFile = resolveReviewPlaybackFile({ cwd: process.cwd(), videoFile: VIDEO_FILE });
   console.log('READY_PORT=' + PORT);
   console.log(`
 🎬 审核服务器已启动
 📍 地址: http://localhost:${PORT}
-📹 视频: ${VIDEO_FILE}
+📹 播放源: ${playbackFile || '(尚未生成审核音频)'}
+🎞️ 启动素材: ${VIDEO_FILE || '(无)'}
 
 操作说明:
 1. 在网页中审核 AI 预选的删除片段

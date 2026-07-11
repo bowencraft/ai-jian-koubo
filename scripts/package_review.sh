@@ -43,7 +43,7 @@ for required in review.html data.json audio.mp3; do
   fi
 done
 
-BASE_NAME="$(basename "$(dirname "$REVIEW_DIR")")"
+BASE_NAME="$(basename "$(dirname "$(dirname "$REVIEW_DIR")")")"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 PACKAGE_DIR="$OUT_PARENT/${BASE_NAME}_review_package_$STAMP"
 
@@ -54,15 +54,6 @@ copy_if_exists() {
   local dst="$2"
   if [ -f "$src" ]; then
     cp "$src" "$dst"
-  fi
-}
-
-copy_dir_if_exists() {
-  local src="$1"
-  local dst="$2"
-  if [ -d "$src" ]; then
-    mkdir -p "$(dirname "$dst")"
-    cp -R "$src" "$dst"
   fi
 }
 
@@ -104,10 +95,65 @@ copy_json_without_waveforms "$REVIEW_DIR/project.json" "$PACKAGE_DIR/review/proj
 copy_if_exists "$REVIEW_DIR/review_draft.json" "$PACKAGE_DIR/review/review_draft.json"
 copy_if_exists "$REVIEW_DIR/peaks.json" "$PACKAGE_DIR/review/peaks.json"
 copy_if_exists "$REVIEW_DIR/silence_periods.json" "$PACKAGE_DIR/review/silence_periods.json"
-copy_dir_if_exists "$REVIEW_DIR/media" "$PACKAGE_DIR/review/media"
-if [ ! -d "$PACKAGE_DIR/review/media" ]; then
-  copy_dir_if_exists "$(dirname "$REVIEW_DIR")/media" "$PACKAGE_DIR/review/media"
-fi
+
+# Make the copied project genuinely portable: archive every available asset and
+# rewrite project/data paths to the package-local media directory. Referenced
+# assets are mandatory because FCPXML export cannot work without them.
+node - "$REVIEW_DIR" "$PACKAGE_DIR/review" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const sourceReviewDir = process.argv[2];
+const packageReviewDir = process.argv[3];
+const projectPath = path.join(packageReviewDir, 'project.json');
+if (!fs.existsSync(projectPath)) process.exit(0);
+
+const project = JSON.parse(fs.readFileSync(projectPath, 'utf8'));
+const assets = Array.isArray(project.assets) ? project.assets : [];
+const referenced = new Set((Array.isArray(project.clips) ? project.clips : []).map(clip => String(clip.assetId || '')));
+const mediaDir = path.join(packageReviewDir, 'media');
+fs.mkdirSync(mediaDir, { recursive: true });
+
+const pathsById = new Map();
+const usedNames = new Set();
+for (const asset of assets) {
+  const rawPath = String(asset.path || '');
+  const sourcePath = path.isAbsolute(rawPath) ? rawPath : path.resolve(sourceReviewDir, rawPath);
+  if (!rawPath || !fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+    if (referenced.has(String(asset.id))) throw new Error(`Referenced asset is missing: ${rawPath || asset.id}`);
+    continue;
+  }
+
+  const safeId = String(asset.id || 'asset').replace(/[^a-zA-Z0-9_-]+/g, '-');
+  const originalName = path.basename(sourcePath);
+  let fileName = `${safeId}-${originalName}`;
+  let suffix = 2;
+  while (usedNames.has(fileName)) {
+    const ext = path.extname(originalName);
+    fileName = `${safeId}-${path.basename(originalName, ext)}-${suffix}${ext}`;
+    suffix += 1;
+  }
+  usedNames.add(fileName);
+  fs.copyFileSync(sourcePath, path.join(mediaDir, fileName));
+  const portablePath = `media/${fileName}`;
+  asset.path = portablePath;
+  pathsById.set(String(asset.id), portablePath);
+}
+
+fs.writeFileSync(projectPath, JSON.stringify(project, null, 2));
+const dataPath = path.join(packageReviewDir, 'data.json');
+if (fs.existsSync(dataPath)) {
+  const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+  for (const container of [data.project, data.timeline]) {
+    if (!container || !Array.isArray(container.assets)) continue;
+    container.assets.forEach(asset => {
+      const portablePath = pathsById.get(String(asset.id));
+      if (portablePath) asset.path = portablePath;
+    });
+  }
+  fs.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+}
+NODE
 
 cp "$SCRIPT_DIR/review_server.js" "$PACKAGE_DIR/server/review_server.js"
 cp "$SCRIPT_DIR/lib/compute_keeps.js" "$PACKAGE_DIR/server/lib/compute_keeps.js"
@@ -117,6 +163,9 @@ cp "$SCRIPT_DIR/lib/review_exports.js" "$PACKAGE_DIR/server/lib/review_exports.j
 cp "$SCRIPT_DIR/lib/refine_boundaries.js" "$PACKAGE_DIR/server/lib/refine_boundaries.js"
 cp "$SCRIPT_DIR/lib/timeline_project.js" "$PACKAGE_DIR/server/lib/timeline_project.js"
 cp "$SCRIPT_DIR/lib/asset_dedupe.js" "$PACKAGE_DIR/server/lib/asset_dedupe.js"
+cp "$SCRIPT_DIR/lib/review_media.js" "$PACKAGE_DIR/server/lib/review_media.js"
+cp "$SCRIPT_DIR/lib/timeline_audio.js" "$PACKAGE_DIR/server/lib/timeline_audio.js"
+cp "$SCRIPT_DIR/lib/review_audio_analysis.js" "$PACKAGE_DIR/server/lib/review_audio_analysis.js"
 
 cat > "$PACKAGE_DIR/start.sh" <<'EOF'
 #!/bin/bash
@@ -179,4 +228,8 @@ EOF
 
 chmod +x "$PACKAGE_DIR/start.sh" "$PACKAGE_DIR/start.command"
 
-echo "$PACKAGE_DIR"
+PACKAGE_ARCHIVE="$PACKAGE_DIR.zip"
+python3 -m zipfile -c "$PACKAGE_ARCHIVE" "$PACKAGE_DIR"
+
+echo "PACKAGE_DIR=$PACKAGE_DIR"
+echo "PACKAGE_ARCHIVE=$PACKAGE_ARCHIVE"

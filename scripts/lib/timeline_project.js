@@ -130,6 +130,18 @@ function stripProjectWaveforms(project) {
   };
 }
 
+function markTranscriptReady(project, { generatedAt = new Date().toISOString() } = {}) {
+  const normalized = normalizeProject(project);
+  return {
+    ...normalized,
+    transcript: {
+      status: 'ready',
+      reason: 'review generated from current transcript',
+      generatedAt,
+    },
+  };
+}
+
 function subtractRanges(start, end, ranges) {
   let pieces = [{ start, end }];
   ranges.forEach((range) => {
@@ -189,6 +201,7 @@ function getProjectDuration(project) {
 module.exports = {
   normalizeProject,
   stripProjectWaveforms,
+  markTranscriptReady,
   createLegacyProject,
   applyTimelineDeletes,
   getProjectDuration,

@@ -14,6 +14,7 @@ let pendingMetadataProbe = null;
 let reviewReady = false;
 let waveformDrawRaf = null;
 let lastPreviewSignature = '';
+let projectFilePath = '';
 
 const labelWidth = 112;
 const trackHeight = 76;
@@ -190,6 +191,7 @@ async function loadProject() {
   normalizeClientProject(data.project);
   reviewDuration = data.reviewDuration || 0;
   reviewReady = data.reviewReady === true;
+  projectFilePath = data.projectFile || projectFilePath;
   fitTimeline(false);
   render();
   setDirty(false);
@@ -211,21 +213,67 @@ async function saveProject() {
   }
   normalizeClientProject(data.project);
   if (typeof data.reviewReady === 'boolean') reviewReady = data.reviewReady;
+  projectFilePath = data.projectFile || projectFilePath;
   render();
   setDirty(false);
-  return true;
+  if (data.reviewAudio && data.reviewAudio.updated) {
+    setStatus(data.transcriptStale ? '已保存，审核音频已更新；请重新转文字和智能裁切' : '已保存，审核音频已更新');
+  } else if (data.reviewAudio && data.reviewAudio.error) {
+    setStatus('已保存，但审核音频更新失败: ' + data.reviewAudio.error);
+  }
+  return data;
+}
+
+function transcriptHandoffPrompt() {
+  const projectRef = projectFilePath || `${project.name || 'multitrack_project'}/project.json`;
+  const action = reviewReady ? '重新转录' : '首次转录';
+  return `使用 AI剪口播 skill，继续处理多轨项目：\n${projectRef}\n\n请创建“${action}与智能裁切”任务，然后基于当前 project.json 渲染多轨审核音频、完成转录和 AI 口误分析，生成并打开审核页。不要沿用旧的审核音频或旧转录结果。`;
+}
+
+function showTranscriptHandoff() {
+  const modal = $('handoffModal');
+  $('handoffPrompt').value = transcriptHandoffPrompt();
+  modal.hidden = false;
+  $('copyHandoffBtn').focus();
+}
+
+function hideTranscriptHandoff() {
+  $('handoffModal').hidden = true;
+}
+
+async function copyTranscriptHandoff() {
+  const field = $('handoffPrompt');
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(field.value);
+    } else {
+      field.focus();
+      field.select();
+      document.execCommand('copy');
+    }
+    $('copyHandoffBtn').textContent = '已复制';
+    setStatus('提示词已复制，回到 AI 对话粘贴即可继续');
+  } catch (err) {
+    field.focus();
+    field.select();
+    setStatus('自动复制失败，提示词已选中，可手动复制');
+  }
 }
 
 async function markNeedsTranscript() {
-  if (!reviewReady) return;
+  if (!project.clips.length) {
+    setStatus('请先把至少一个素材片段放到时间线');
+    return;
+  }
   project.transcript = {
     status: 'stale',
-    reason: 'timeline edited by human',
+    reason: reviewReady ? 'timeline edited by human' : 'timeline ready for first transcription',
     markedAt: new Date().toISOString()
   };
   setDirty(true);
-  setStatus('已标记重转录，正在保存...');
-  await saveProject();
+  setStatus('正在保存并准备 AI 接力提示...');
+  const saved = await saveProject();
+  if (saved) showTranscriptHandoff();
 }
 
 function inferKindFromFile(file) {
@@ -431,9 +479,11 @@ function renderFlowButtons() {
   const staleBtn = $('staleBtn');
   if (!reviewBtn || !staleBtn) return;
   reviewBtn.disabled = !reviewReady;
-  staleBtn.disabled = !reviewReady;
+  staleBtn.disabled = !project.clips.length;
   reviewBtn.title = reviewReady ? '回到审核页' : '当前项目还未生成审核页。保存后回到聊天框，让 AI 开始创建审核';
-  staleBtn.title = reviewReady ? '标记需要重新转文字和智能裁切' : '首次创建项目时还没有转文字结果，无需标记重转录';
+  staleBtn.title = project.clips.length
+    ? (reviewReady ? '完成编辑，标记需要重新转文字并复制 AI 提示词' : '完成编辑并复制 AI 转录提示词')
+    : '先把素材片段放到时间线';
 }
 
 function renderAssets() {
@@ -1312,6 +1362,9 @@ function bindChrome() {
   $('saveBtn').onclick = saveProject;
   $('reviewBtn').onclick = () => { if (reviewReady) location.href = '/review.html'; };
   $('staleBtn').onclick = () => markNeedsTranscript().catch(err => setStatus('标记失败: ' + err.message));
+  $('closeHandoffBtn').onclick = hideTranscriptHandoff;
+  $('copyHandoffBtn').onclick = copyTranscriptHandoff;
+  $('handoffModal').onclick = event => { if (event.target === $('handoffModal')) hideTranscriptHandoff(); };
   $('deleteClipBtn').onclick = deleteSelectedClip;
   $('playBtn').onclick = () => isPlaying ? pausePreview() : playPreview();
   $('stopBtn').onclick = stopPreview;
