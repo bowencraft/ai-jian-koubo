@@ -4,6 +4,7 @@ let words = [];
     const aiSelectedIds = new Set();
 
     const video = document.getElementById('player');
+    const crossfadePlayer = document.getElementById('crossfadePlayer');
     const timeCur = document.getElementById('timeCur');
     const timeTot = document.getElementById('timeTot');
     const content = document.getElementById('content');
@@ -23,13 +24,19 @@ let words = [];
     let previewUntil = null;          // 「试听这段」时播放到此秒数即停（且期间不跳删除段）
     let currentProjectSignature = null;
     let reviewDir = '';
+    let toastTimer = null;
 
     // 波形 / 切割预览数据
     let peaksData = null;          // { duration, sampleRate, peaks:[0..1] }
     let silencePeriods = [];       // ffmpeg/能量检测的静音段，仅用于切点吸附
     let breathSegments = [];       // transcript 中可点击的气口段，用于青蓝标注
     let cutOpts = {                // 切割参数（与 lib/compute_keeps.js 默认一致，可被滑块覆盖）
-      lookBack: 0.6, padStart: 2 / 30, padEnd: 2 / 30, minInternalSilence: 0.2, trimInternalSilence: false
+      lookBack: 0.6,
+      padStart: 2 / 30,
+      padEnd: 2 / 30,
+      crossfadeMs: 80,
+      minInternalSilence: 0.2,
+      trimInternalSilence: false
     };
     const TimelineView = window.ReviewTimelineView || {};
     const STATUS_COL = TimelineView.REVIEW_STATUS_COLORS || {
@@ -56,6 +63,18 @@ let words = [];
     labelEl.textContent = loadingMessages[0];
 
     const fetchJSON = (url) => fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
+
+    function showToast(message, tone = 'info', duration = 2800) {
+      const region = document.getElementById('toastRegion');
+      if (!region) return;
+      clearTimeout(toastTimer);
+      region.innerHTML = '';
+      const toast = document.createElement('div');
+      toast.className = `app-toast ${tone}`;
+      toast.textContent = message;
+      region.appendChild(toast);
+      toastTimer = setTimeout(() => { region.innerHTML = ''; }, duration);
+    }
     const PROJECT_LABEL_W = 68;
     const WAVE_COL = {
       bg: '#0E0E13',
@@ -354,7 +373,10 @@ let words = [];
     }
 
     function togglePlay()  { clearPreview(); video.paused ? video.play() : video.pause(); }
-    function setSpeed(v)   { video.playbackRate = v; }
+    function setSpeed(v)   {
+      video.playbackRate = v;
+      crossfadePlayer.playbackRate = v;
+    }
     function seekRel(d)    { clearPreview(); video.currentTime = Math.max(0, video.currentTime + d); }
 
     // ============================================================
@@ -391,6 +413,8 @@ let words = [];
           // 状态栏：总时长 / 剪后
           let finalDur = 0;
           for (const k of keeps) finalDur += (k.end - k.start);
+          const fades = ComputeKeeps.computeCrossfadeDurations(keeps, cutOpts.crossfadeMs);
+          finalDur -= fades.reduce((sum, value) => sum + value, 0);
           const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
           set('tl-total', formatTime(duration));
           set('tl-final', formatTime(finalDur));
@@ -663,18 +687,27 @@ let words = [];
       // 不再暴露为滑块——它们是「工具自动做对的事」，面板用静态说明讲清机制即可。
       const padS = document.getElementById('knob-padstart');
       const padE = document.getElementById('knob-padend');
+      const crossfade = document.getElementById('knob-crossfade');
       const padSV = document.getElementById('knob-padstart-val');
       const padEV = document.getElementById('knob-padend-val');
+      const crossfadeV = document.getElementById('knob-crossfade-val');
+      padS.value = String(Math.round((Number(cutOpts.padStart) || 0) * 30));
+      padE.value = String(Math.round((Number(cutOpts.padEnd) || 0) * 30));
+      crossfade.value = String(ComputeKeeps.normalizeCrossfadeMs(cutOpts.crossfadeMs));
       const sync = () => {
         const fs = parseInt(padS.value, 10), fe = parseInt(padE.value, 10);
+        const crossfadeMs = ComputeKeeps.normalizeCrossfadeMs(crossfade.value);
         cutOpts.padStart = fs / 30;
         cutOpts.padEnd = fe / 30;
+        cutOpts.crossfadeMs = crossfadeMs;
         padSV.textContent = fs + ' 帧';
         padEV.textContent = fe + ' 帧';
+        crossfadeV.textContent = crossfadeMs + ' ms';
+        cancelActiveCrossfade();
         playbackCutsDirty = true;   // 切割参数变了，播放跳段也要跟着重算
         wave.redraw();
       };
-      [padS, padE].forEach(el => el.addEventListener('input', sync));
+      [padS, padE, crossfade].forEach(el => el.addEventListener('input', sync));
       sync();
     }
 
@@ -1016,9 +1049,59 @@ let words = [];
     }
 
     // 试听这段：从段首播到段尾即停；期间不跳删除段（否则红段会被直接跳过听不到）
-    function clearPreview() { previewUntil = null; }
+    let activeCrossfade = null;
+    function cancelActiveCrossfade() {
+      activeCrossfade = null;
+      crossfadePlayer.pause();
+      crossfadePlayer.volume = 0;
+      video.volume = 1;
+    }
+    function clearPreview() {
+      previewUntil = null;
+      cancelActiveCrossfade();
+    }
+    function crossfadeDurationForCut(cuts, index, duration) {
+      const requested = ComputeKeeps.normalizeCrossfadeMs(cutOpts.crossfadeMs) / 1000;
+      const cut = cuts[index];
+      if (!requested || !cut || cut.start <= 0 || cut.end >= duration) return 0;
+      const previousKeepStart = index > 0 ? cuts[index - 1].end : 0;
+      const nextKeepEnd = index + 1 < cuts.length ? cuts[index + 1].start : duration;
+      return Math.max(0, Math.min(
+        requested,
+        (cut.start - previousKeepStart) / 2,
+        (nextKeepEnd - cut.end) / 2
+      ));
+    }
+    function beginCrossfade(cut, duration) {
+      activeCrossfade = { cut, duration, start: cut.start - duration };
+      crossfadePlayer.pause();
+      crossfadePlayer.playbackRate = video.playbackRate;
+      crossfadePlayer.currentTime = cut.end;
+      crossfadePlayer.volume = 0;
+      crossfadePlayer.play().catch(() => {
+        if (activeCrossfade && activeCrossfade.cut === cut) cancelActiveCrossfade();
+      });
+    }
+    function updateActiveCrossfade(time, mediaDuration) {
+      if (!activeCrossfade) return false;
+      const state = activeCrossfade;
+      const progress = Math.max(0, Math.min(1, (time - state.start) / state.duration));
+      video.volume = Math.cos(progress * Math.PI / 2);
+      crossfadePlayer.volume = Math.sin(progress * Math.PI / 2);
+      if (progress < 1 && time < state.cut.start) return true;
+
+      const target = Math.min(mediaDuration, state.cut.end + state.duration);
+      crossfadePlayer.pause();
+      crossfadePlayer.volume = 0;
+      video.volume = 1;
+      activeCrossfade = null;
+      lastSeekTarget = state.cut.end;
+      video.currentTime = target;
+      return true;
+    }
     function previewSpan(span) {
       hideToolbar();
+      cancelActiveCrossfade();
       previewUntil = span.end;
       video.currentTime = span.start;
       video.play().catch(() => {});
@@ -1051,6 +1134,25 @@ let words = [];
       const SEEK_EPS = 0.03;
       const segs = getPlaybackCuts();
       if (segs.length) {
+        if (updateActiveCrossfade(t, dur)) {
+          updatePlayheadUI(t, dur);
+          rafId = requestAnimationFrame(tick);
+          return;
+        }
+
+        for (let index = 0; index < segs.length; index++) {
+          const fadeDuration = crossfadeDurationForCut(segs, index, dur);
+          if (!fadeDuration) continue;
+          const fadeStart = segs[index].start - fadeDuration;
+          if (t >= fadeStart && t < segs[index].start) {
+            beginCrossfade(segs[index], fadeDuration);
+            updateActiveCrossfade(t, dur);
+            updatePlayheadUI(t, dur);
+            rafId = requestAnimationFrame(tick);
+            return;
+          }
+        }
+
         let lo = 0, hi = segs.length - 1, hit = -1;
         while (lo <= hi) {
           const mid = (lo + hi) >> 1;
@@ -1125,6 +1227,7 @@ let words = [];
       startTick();
     });
     video.addEventListener('pause', () => {
+      cancelActiveCrossfade();
       setPlayButtonState(false);
       // 暂停时刷新一次时间/波形，确保静止状态准确
       const t = video.currentTime, dur = video.duration || 0;
@@ -1141,7 +1244,18 @@ let words = [];
     video.addEventListener('loadedmetadata', () => {
       timeTot.textContent = formatTime(video.duration || 0);
     });
-    function clearAll() { pushUndo(); selected.clear(); markSegsDirty(); render(); }
+    function clearAll() {
+      if (!selected.size) {
+        showToast('当前没有删减选择');
+        return;
+      }
+      const count = selected.size;
+      pushUndo();
+      selected.clear();
+      markSegsDirty();
+      render();
+      showToast(`已清空 ${count} 个删减选择，可用 ⌘Z 撤销`);
+    }
 
     function getSelectedIdx() {
       return [...selected]
@@ -1181,7 +1295,7 @@ let words = [];
       };
     }
 
-    async function saveDraft() {
+    async function saveDraft({ silent = false } = {}) {
       try {
         const res = await fetch('/api/draft', {
           method: 'POST',
@@ -1190,10 +1304,26 @@ let words = [];
         });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || '保存失败');
-        alert(`✅ 进度已保存\n\n已保存 ${data.count} 个选中项\n文件: review_draft.json`);
+        if (!silent) showToast(`审核进度已保存 · ${data.count} 个删减选择`, 'success');
+        return data;
       } catch (err) {
-        alert('❌ 保存失败: ' + err.message);
+        showToast('审核进度保存失败：' + err.message, 'error', 4800);
+        return null;
       }
+    }
+
+    async function goToEditor() {
+      const button = document.getElementById('editorBtn');
+      button.disabled = true;
+      button.setAttribute('aria-busy', 'true');
+      showToast('正在保存审核进度...');
+      const saved = await saveDraft({ silent: true });
+      if (saved) {
+        location.href = '/editor.html';
+        return;
+      }
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
     }
 
     function exportDraft() {
@@ -1205,6 +1335,7 @@ let words = [];
       a.download = `review_draft_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
       a.click();
       URL.revokeObjectURL(url);
+      showToast('审核进度 JSON 已导出', 'success');
     }
 
     async function importDraftFile(event) {
@@ -1234,9 +1365,9 @@ let words = [];
         });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || '导入后保存失败');
-        alert(`✅ 进度已导入\n\n已恢复 ${data.count} 个选中项，并保存为本地 review_draft.json`);
+        showToast(`进度已导入 · 恢复 ${data.count} 个删减选择`, 'success');
       } catch (err) {
-        alert('❌ 导入失败: ' + err.message);
+        showToast('进度导入失败：' + err.message, 'error', 4800);
       }
     }
 
@@ -1251,6 +1382,8 @@ let words = [];
       });
       markSegsDirty();
       render();
+      const count = gapGroups.filter(group => group.duration >= threshold).length;
+      showToast(count ? `已选择 ${count} 处 ≥ ${threshold}s 的气口` : `没有 ≥ ${threshold}s 的气口`);
     }
 
     function closeExportMenu() {
@@ -1409,14 +1542,12 @@ let words = [];
 
     async function exportFCPXML() {
       closeExportMenu();
-      const segments = getDeleteSegments();
-      if (!segments.length) { alert('没有选中任何片段'); return; }
       try {
         const data = await postExport('/api/fcpxml', buildExportPayload());
         const fileName = await downloadOutput(data.output);
         showDistributionHandoff('FCPXML 已导出', `文件：${fileName} · 保留片段：${data.segments} 个`, fileName);
       } catch (err) {
-        alert('❌ 请求失败: ' + err.message + '\n\n请确保使用 review_server.js 启动服务');
+        showToast('FCPXML 导出失败：' + err.message, 'error', 5200);
       }
     }
 
@@ -1435,7 +1566,7 @@ let words = [];
         showDistributionHandoff('音频已导出', `文件：${fileName} · 码率：${(job && job.bitrate) || data.bitrate} · 保留片段：${(job && job.segments) || data.segments} 个`, fileName);
       } catch (err) {
         hideExportProgress();
-        alert('❌ 音频导出失败: ' + err.message + '\n\n请确保已安装 ffmpeg，并使用 review_server.js 启动服务');
+        showToast('音频导出失败：' + err.message, 'error', 5200);
       }
     }
 
@@ -1446,7 +1577,7 @@ let words = [];
         const fileName = await downloadOutput(data.output);
         showDistributionHandoff('SRT 已导出', `文件：${fileName} · 字幕：${data.cues} 条`, fileName);
       } catch (err) {
-        alert('❌ SRT 导出失败: ' + err.message + '\n\n请确保使用 review_server.js 启动服务');
+        showToast('SRT 导出失败：' + err.message, 'error', 5200);
       }
     }
 

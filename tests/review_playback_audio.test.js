@@ -4,7 +4,7 @@ const os = require('os');
 const path = require('path');
 
 const { resolveReviewPlaybackFile } = require('../scripts/lib/review_media');
-const { computeFinalKeeps, keepsToCuts } = require('../scripts/lib/compute_keeps');
+const { computeFinalKeeps, keepsToCuts, computeCrossfadeDurations } = require('../scripts/lib/compute_keeps');
 const {
   buildTimelineAudioArgs,
   listAudibleTimelineClips,
@@ -34,6 +34,18 @@ const {
     resolveReviewPlaybackFile({ cwd: dir, videoFile: legacyAudio }),
     legacyAudio,
     'legacy video argument should remain the fallback when review audio is absent'
+  );
+}
+
+{
+  assert.deepStrictEqual(
+    computeCrossfadeDurations([
+      { start: 0, end: 0.1 },
+      { start: 1, end: 2 },
+      { start: 3, end: 4 },
+    ], 200),
+    [0.05, 0.2],
+    'global crossfade should be capped for short neighboring keeps'
   );
 }
 

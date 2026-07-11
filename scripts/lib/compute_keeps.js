@@ -146,5 +146,30 @@
     return cuts;
   }
 
-  return { computeFinalKeeps, keepsToCuts, intervalSubtract, DEFAULTS };
+  function normalizeCrossfadeMs(value) {
+    const ms = Number(value);
+    return Number.isFinite(ms) ? Math.max(0, Math.min(200, ms)) : 0;
+  }
+
+  // 每个接缝使用同一个全局值，但最多占相邻片段各自一半，避免极短片段被过渡完全覆盖。
+  function computeCrossfadeDurations(finalKeeps, crossfadeMs) {
+    const keeps = (finalKeeps || []).filter(keep => keep && keep.end > keep.start);
+    const requested = normalizeCrossfadeMs(crossfadeMs) / 1000;
+    if (!requested || keeps.length < 2) return Array(Math.max(0, keeps.length - 1)).fill(0);
+    return keeps.slice(0, -1).map((keep, index) => {
+      const next = keeps[index + 1];
+      const left = Math.max(0, keep.end - keep.start);
+      const right = Math.max(0, next.end - next.start);
+      return Math.max(0, Math.min(requested, left / 2, right / 2));
+    });
+  }
+
+  return {
+    computeFinalKeeps,
+    keepsToCuts,
+    intervalSubtract,
+    normalizeCrossfadeMs,
+    computeCrossfadeDurations,
+    DEFAULTS,
+  };
 });

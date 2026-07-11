@@ -2,10 +2,12 @@ const assert = require('assert');
 
 const {
   buildAudioExportArgs,
+  buildCrossfadeAudioArgs,
   buildConcatScript,
   buildEditedSrt,
   normalizeBitrate,
   parseFfmpegProgressLine,
+  crossfadedDuration,
   renderEditedAudio,
 } = require('../scripts/lib/review_exports');
 
@@ -30,6 +32,25 @@ const {
   assert(result.srt.includes('00:00:00,000 --> 00:00:00,900'), 'cue time should be collapsed through deleted ranges');
   assert(result.srt.includes('你好世界。'), 'kept words should be preserved');
   assert(!result.srt.includes('嗯'), 'deleted words should not appear in SRT');
+}
+
+{
+  const finalKeeps = [
+    { start: 0.0, end: 0.5 },
+    { start: 1.0, end: 1.4 },
+  ];
+  const built = buildCrossfadeAudioArgs({
+    sourceAudio: '/tmp/source.mp3',
+    outputPath: '/tmp/out.mp3',
+    finalKeeps,
+    bitrate: '128k',
+    crossfadeMs: 100,
+    includeProgress: true,
+  });
+  const graph = built.args[built.args.indexOf('-filter_complex') + 1];
+  assert(graph.includes('acrossfade=d=0.100:c1=qsin:c2=qsin'), 'audio graph should apply the requested equal-power crossfade');
+  assert(built.args.includes('/tmp/source.mp3'), 'crossfade export should read the review audio directly');
+  assert(Math.abs(crossfadedDuration(finalKeeps, 100) - 0.8) < 1e-9, 'crossfade overlap should shorten the rendered duration');
 }
 
 {
@@ -94,4 +115,24 @@ const {
   assert(calls[0].args.includes('128k'), 'target bitrate should be passed to ffmpeg');
   assert(calls[0].args.includes('-f') && calls[0].args.includes('concat'), 'ffmpeg should read a concat script');
   assert(!calls[0].args.includes('-filter_complex'), 'ffmpeg should avoid a giant filter graph');
+}
+
+{
+  const calls = [];
+  renderEditedAudio({
+    sourceAudio: '/tmp/source.mp3',
+    outputPath: '/tmp/out.mp3',
+    finalKeeps: [
+      { start: 0.0, end: 0.5 },
+      { start: 1.0, end: 1.4 },
+    ],
+    bitrate: '128k',
+    crossfadeMs: 80,
+    spawnSync: (cmd, args) => {
+      calls.push({ cmd, args });
+      return { status: 0 };
+    },
+  });
+  assert(calls[0].args.includes('-filter_complex'), 'crossfade audio export should use a filter graph');
+  assert(!calls[0].args.includes('concat'), 'crossfade audio export should not use the hard-cut concat path');
 }

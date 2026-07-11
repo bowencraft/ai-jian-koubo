@@ -27,6 +27,10 @@
   <!-- 顶栏 · 与素材编辑页共用同一工具语言 -->
   <div class="topbar">
     <div class="tb-left">
+      <button class="page-switch editor-switch" id="editorBtn" onclick="goToEditor()" title="进入素材编辑页" aria-label="进入素材编辑页">
+        <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4zM8 3v6M16 3v6M8 15h8"/></svg>
+        <span>编辑</span>
+      </button>
       <div class="brand">剪<em>播客</em></div>
       <div class="file-meta">
         <div class="file-sub" id="fileSub">REVIEW <span class="dot">●</span> 加载中</div>
@@ -54,7 +58,6 @@
       <span class="time-display"><span id="timeCur">00:00</span><span class="sep">/</span><span id="timeTot">00:00</span></span>
     </div>
     <div class="tb-right">
-      <button class="icon-btn" onclick="location.href='/editor.html'" title="回到素材编辑页" aria-label="回到素材编辑页"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4zM8 3v6M16 3v6M8 15h8"/></svg></button>
       <button class="icon-btn" onclick="saveDraft()" title="保存审核进度" aria-label="保存审核进度"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5z"/><path d="M8 3v6h8V3M8 21v-7h8v7"/></svg></button>
       <button class="icon-btn" onclick="exportDraft()" title="导出审核进度 JSON" aria-label="导出审核进度 JSON"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 19h14"/></svg></button>
       <button class="icon-btn" onclick="document.getElementById('draftImport').click()" title="导入审核进度 JSON" aria-label="导入审核进度 JSON"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M5 20h14"/></svg></button>
@@ -74,6 +77,8 @@
       <button class="icon-btn danger" onclick="clearAll()" title="清空全部删减选择" aria-label="清空全部删减选择"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M7 7l1 14h8l1-14"/></svg></button>
     </div>
   </div>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
 
   <!-- 主体 -->
   <div class="workspace">
@@ -117,13 +122,14 @@
         <div class="card video-card">
           <div id="video-container">
             <video id="player" src="/video" preload="metadata"></video>
+            <audio id="crossfadePlayer" src="/video" preload="auto" hidden></audio>
           </div>
         </div>
 
         <!-- Cut params card -->
         <div class="card">
           <div class="card-head">
-            <span class="label">/ 气口剪辑</span>
+            <span class="label">/ 边缘剪辑</span>
           </div>
           <div class="knobs-body">
             <div class="knob">
@@ -135,6 +141,12 @@
               <div class="knob-head"><span>句尾</span><b id="knob-padend-val">2 帧</b></div>
               <div class="knob-hint">每句结尾多留几帧再收，避免话没说完就被切</div>
               <input type="range" id="knob-padend" min="0" max="8" step="1" value="2">
+            </div>
+            <div class="knob crossfade-knob">
+              <div class="knob-head"><span>Crossfade</span><b id="knob-crossfade-val">80 ms</b></div>
+              <div class="knob-hint">所有切口统一交叉淡化，实时试听与导出使用同一参数</div>
+              <input type="range" id="knob-crossfade" min="0" max="200" step="10" value="80" aria-label="全局 Crossfade 时长">
+              <div class="range-scale" aria-hidden="true"><span>0</span><span>100</span><span>200 ms</span></div>
             </div>
             <div class="tightness">
               <div class="tightness-line">

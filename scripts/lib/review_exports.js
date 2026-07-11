@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn: defaultSpawn, spawnSync: defaultSpawnSync } = require('child_process');
+const { computeCrossfadeDurations } = require('./compute_keeps');
 
 const ALLOWED_BITRATES = new Set(['96k', '128k', '192k', '256k']);
 const SENTENCE_END_RE = /[。！？!?；;]/;
@@ -83,8 +84,51 @@ function buildAudioExportArgs({ concatFile, outputPath, bitrate, includeProgress
   return args;
 }
 
+function buildCrossfadeAudioArgs({ sourceAudio, outputPath, finalKeeps, bitrate, crossfadeMs, includeProgress = false }) {
+  const keeps = cleanKeeps(finalKeeps);
+  if (!keeps.length) throw new Error('No kept audio segments to export');
+  const targetBitrate = normalizeBitrate(bitrate);
+  const crossfades = computeCrossfadeDurations(keeps, crossfadeMs);
+  const args = ['-y'];
+  if (includeProgress) args.push('-nostats', '-progress', 'pipe:2');
+  args.push('-i', sourceAudio);
+
+  const filters = [];
+  if (keeps.length === 1) {
+    filters.push(`[0:a]atrim=start=${seconds(keeps[0].start)}:end=${seconds(keeps[0].end)},asetpts=PTS-STARTPTS[out]`);
+  } else {
+    filters.push(`[0:a]asplit=${keeps.length}${keeps.map((_, index) => `[src${index}]`).join('')}`);
+    keeps.forEach((keep, index) => {
+      filters.push(`[src${index}]atrim=start=${seconds(keep.start)}:end=${seconds(keep.end)},asetpts=PTS-STARTPTS[a${index}]`);
+    });
+    let current = 'a0';
+    for (let index = 1; index < keeps.length; index++) {
+      const output = index === keeps.length - 1 ? 'out' : `xf${index}`;
+      filters.push(`[${current}][a${index}]acrossfade=d=${seconds(crossfades[index - 1])}:c1=qsin:c2=qsin[${output}]`);
+      current = output;
+    }
+  }
+
+  args.push(
+    '-filter_complex', filters.join(';'),
+    '-map', '[out]',
+    '-ac', '2',
+    '-ar', '48000',
+    '-codec:a', 'libmp3lame',
+    '-b:a', targetBitrate,
+    outputPath,
+  );
+  return { args, crossfades };
+}
+
 function totalKeepDuration(finalKeeps) {
   return cleanKeeps(finalKeeps).reduce((sum, keep) => sum + Math.max(0, keep.end - keep.start), 0);
+}
+
+function crossfadedDuration(finalKeeps, crossfadeMs) {
+  const keeps = cleanKeeps(finalKeeps);
+  const overlap = computeCrossfadeDurations(keeps, crossfadeMs).reduce((sum, value) => sum + value, 0);
+  return Math.max(0, totalKeepDuration(keeps) - overlap);
 }
 
 function parseProgressTime(line) {
@@ -110,12 +154,14 @@ function parseFfmpegProgressLine(line, totalDuration) {
   return { outTime, progress };
 }
 
-function keptTimeAt(time, keeps) {
+function keptTimeAt(time, keeps, crossfades) {
   let out = 0;
-  for (const keep of keeps) {
+  for (let index = 0; index < keeps.length; index++) {
+    const keep = keeps[index];
     if (time <= keep.start) return out;
     if (time < keep.end) return out + (time - keep.start);
     out += keep.end - keep.start;
+    if (index < keeps.length - 1) out -= crossfades[index] || 0;
   }
   return out;
 }
@@ -143,8 +189,9 @@ function textLength(text) {
   return Array.from(String(text || '')).length;
 }
 
-function buildEditedSrt({ words, finalKeeps, maxCueChars = 32, maxCueDuration = 6, maxGap = 0.8 }) {
+function buildEditedSrt({ words, finalKeeps, crossfadeMs = 0, maxCueChars = 32, maxCueDuration = 6, maxGap = 0.8 }) {
   const keeps = cleanKeeps(finalKeeps);
+  const crossfades = computeCrossfadeDurations(keeps, crossfadeMs);
   const mapped = [];
 
   (Array.isArray(words) ? words : []).forEach((word) => {
@@ -156,8 +203,8 @@ function buildEditedSrt({ words, finalKeeps, maxCueChars = 32, maxCueDuration = 
     if (!(clippedEnd > clippedStart)) return;
     mapped.push({
       text: String(word.text),
-      start: keptTimeAt(clippedStart, keeps),
-      end: keptTimeAt(clippedEnd, keeps),
+      start: keptTimeAt(clippedStart, keeps, crossfades),
+      end: keptTimeAt(clippedEnd, keeps, crossfades),
     });
   });
 
@@ -201,14 +248,18 @@ function buildEditedSrt({ words, finalKeeps, maxCueChars = 32, maxCueDuration = 
   return { srt, cues };
 }
 
-function renderEditedAudio({ sourceAudio, outputPath, finalKeeps, bitrate, spawnSync = defaultSpawnSync }) {
+function renderEditedAudio({ sourceAudio, outputPath, finalKeeps, bitrate, crossfadeMs = 0, spawnSync = defaultSpawnSync }) {
   const keeps = cleanKeeps(finalKeeps);
   if (!keeps.length) throw new Error('No kept audio segments to export');
   const targetBitrate = normalizeBitrate(bitrate);
 
-  const { concatFile, cleanup } = writeConcatScript(sourceAudio, keeps);
+  const useCrossfade = computeCrossfadeDurations(keeps, crossfadeMs).some(value => value > 0);
+  const concat = useCrossfade ? null : writeConcatScript(sourceAudio, keeps);
+  const cleanup = concat ? concat.cleanup : () => {};
   try {
-    const args = buildAudioExportArgs({ concatFile, outputPath, bitrate: targetBitrate });
+    const args = useCrossfade
+      ? buildCrossfadeAudioArgs({ sourceAudio, outputPath, finalKeeps: keeps, bitrate: targetBitrate, crossfadeMs }).args
+      : buildAudioExportArgs({ concatFile: concat.concatFile, outputPath, bitrate: targetBitrate });
     const result = spawnSync('ffmpeg', args, { stdio: 'inherit' });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`ffmpeg failed with exit code ${result.status}`);
@@ -224,20 +275,32 @@ function runEditedAudioExport({
   outputPath,
   finalKeeps,
   bitrate,
+  crossfadeMs = 0,
   spawn = defaultSpawn,
   onProgress,
 }) {
   const keeps = cleanKeeps(finalKeeps);
   if (!keeps.length) return Promise.reject(new Error('No kept audio segments to export'));
   const targetBitrate = normalizeBitrate(bitrate);
-  const expectedDuration = totalKeepDuration(keeps);
-  const { concatFile, cleanup } = writeConcatScript(sourceAudio, keeps);
-  const args = buildAudioExportArgs({
-    concatFile,
-    outputPath,
-    bitrate: targetBitrate,
-    includeProgress: true,
-  });
+  const useCrossfade = computeCrossfadeDurations(keeps, crossfadeMs).some(value => value > 0);
+  const expectedDuration = crossfadedDuration(keeps, crossfadeMs);
+  const concat = useCrossfade ? null : writeConcatScript(sourceAudio, keeps);
+  const cleanup = concat ? concat.cleanup : () => {};
+  const args = useCrossfade
+    ? buildCrossfadeAudioArgs({
+        sourceAudio,
+        outputPath,
+        finalKeeps: keeps,
+        bitrate: targetBitrate,
+        crossfadeMs,
+        includeProgress: true,
+      }).args
+    : buildAudioExportArgs({
+        concatFile: concat.concatFile,
+        outputPath,
+        bitrate: targetBitrate,
+        includeProgress: true,
+      });
 
   return new Promise((resolve, reject) => {
     let stderr = '';
@@ -280,11 +343,13 @@ function runEditedAudioExport({
 
 module.exports = {
   buildAudioExportArgs,
+  buildCrossfadeAudioArgs,
   buildConcatScript,
   buildEditedSrt,
   formatSrtTime,
   normalizeBitrate,
   parseFfmpegProgressLine,
+  crossfadedDuration,
   renderEditedAudio,
   runEditedAudioExport,
   totalKeepDuration,

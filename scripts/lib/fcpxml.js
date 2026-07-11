@@ -6,14 +6,14 @@
  * compute_keeps.js 这一份切割算法），再渲染成可被剪映 / Final Cut Pro 导入的 FCPXML。
  *
  * 设计约束（改动前必读）：
- *   - FCPXML 1.8 DTD 不支持 fade 元素，淡入淡出留给剪辑软件自己加
+ *   - FCPXML 1.8 的音量参数支持 fadeIn/fadeOut；全局 crossfade 用重叠片段 + 音量包络表示
  *   - 媒体引用用绝对路径的 file:// URI（百分号编码），剪映和 FCP 都靠它定位源视频
  *   - 时间一律用 FCP ticks（帧号 × fpsDen），不要改成秒——浮点累积会导致 ±1 帧漂移
  */
 
 const path = require('path');
 const { execSync } = require('child_process');
-const { computeFinalKeeps } = require('./compute_keeps');
+const { computeFinalKeeps, computeCrossfadeDurations } = require('./compute_keeps');
 const {
   normalizeProject,
   createLegacyProject,
@@ -114,10 +114,34 @@ function collapsedTime(time, deletes) {
   return Math.max(0, time - removed);
 }
 
+function crossfadePrefix(durations) {
+  const prefix = [0];
+  durations.forEach(value => prefix.push(prefix[prefix.length - 1] + value));
+  return prefix;
+}
+
+function keepIndexAt(finalKeeps, time) {
+  const epsilon = 0.002;
+  return finalKeeps.findIndex(keep => time >= keep.start - epsilon && time < keep.end - epsilon);
+}
+
+function volumeFadeXml({ fadeIn, fadeOut, toTicks, denominator, indent }) {
+  if (!(fadeIn > 0) && !(fadeOut > 0)) return '';
+  const pad = indent || '              ';
+  const lines = [`${pad}<adjust-volume amount="0dB">`, `${pad}  <param name="volume">`];
+  if (fadeIn > 0) lines.push(`${pad}    <fadeIn type="easeIn" duration="${toTicks(fadeIn)}/${denominator}s" />`);
+  if (fadeOut > 0) lines.push(`${pad}    <fadeOut type="easeOut" duration="${toTicks(fadeOut)}/${denominator}s" />`);
+  lines.push(`${pad}  </param>`, `${pad}</adjust-volume>`);
+  return lines.join('\n');
+}
+
 function buildTimelineFcpxml({ project, deleteList, silencePeriods, cutOpts, durationHint, outputPath }) {
   const normalized = normalizeProject(project);
   const projectDuration = Math.max(getProjectDuration(normalized), Number(durationHint) || 0);
   const finalKeeps = computeFinalKeeps(deleteList || [], silencePeriods || [], projectDuration, cutOpts || {});
+  const crossfades = computeCrossfadeDurations(finalKeeps, cutOpts && cutOpts.crossfadeMs);
+  const crossfadeOffsets = crossfadePrefix(crossfades);
+  const hasCrossfade = crossfades.some(value => value > 0);
   const effectiveDeletes = inverseKeeps(finalKeeps, projectDuration);
 
   const assetMetas = normalized.assets.map((asset, index) => {
@@ -138,11 +162,23 @@ function buildTimelineFcpxml({ project, deleteList, silencePeriods, cutOpts, dur
   const audioRate = 48000;
 
   const finalClips = applyTimelineDeletes(normalized, effectiveDeletes)
-    .map(clip => ({
-      ...clip,
-      asset: assetById.get(clip.assetId),
-      timelineStart: collapsedTime(clip.timelineStart, effectiveDeletes),
-    }))
+    .map(clip => {
+      const originalTimelineStart = clip.timelineStart;
+      const originalTimelineEnd = clip.timelineStart + clip.duration;
+      const keepIndex = keepIndexAt(finalKeeps, originalTimelineStart);
+      const keep = keepIndex >= 0 ? finalKeeps[keepIndex] : null;
+      const epsilon = 0.002;
+      return {
+        ...clip,
+        asset: assetById.get(clip.assetId),
+        keepIndex,
+        fadeIn: keep && keepIndex > 0 && Math.abs(originalTimelineStart - keep.start) < epsilon
+          ? crossfades[keepIndex - 1] : 0,
+        fadeOut: keep && keepIndex < crossfades.length && Math.abs(originalTimelineEnd - keep.end) < epsilon
+          ? crossfades[keepIndex] : 0,
+        timelineStart: collapsedTime(originalTimelineStart, effectiveDeletes) - (crossfadeOffsets[keepIndex] || 0),
+      };
+    })
     .filter(clip => clip.asset && clip.duration > 0);
 
   const resources = assetMetas.map((asset) => {
@@ -158,14 +194,30 @@ function buildTimelineFcpxml({ project, deleteList, silencePeriods, cutOpts, dur
     const offsetTicks = toFCPTicks(clip.timelineStart);
     const startTicks = toFCPTicks(clip.sourceStart);
     const durTicks = toFCPTicks(clip.duration);
-    const laneAttr = clip.lane ? ` lane="${clip.lane}"` : '';
+    const transitionLane = Math.max(0, Number(clip.trackIndex) || 0) * 2 + 1 + (Math.max(0, clip.keepIndex) % 2);
+    const lane = hasCrossfade ? transitionLane : clip.lane;
+    const laneAttr = lane ? ` lane="${lane}"` : '';
     const formatAttr = asset.media.hasVideo ? ' format="rfmt"' : '';
-    return `            <asset-clip name="${xmlAttr(asset.name)}" offset="${offsetTicks}/${fpsNum}s"${laneAttr} ref="${asset.resourceId}" start="${startTicks}/${fpsNum}s" duration="${durTicks}/${fpsNum}s" audioRole="${xmlAttr(clip.audioRole)}"${formatAttr} tcFormat="NDF" />`;
+    const fadeXml = asset.hasAudio === false ? '' : volumeFadeXml({
+      fadeIn: clip.fadeIn,
+      fadeOut: clip.fadeOut,
+      toTicks: toFCPTicks,
+      denominator: fpsNum,
+      indent: hasCrossfade ? '                ' : '              ',
+    });
+    const open = `${hasCrossfade ? '              ' : '            '}<asset-clip name="${xmlAttr(asset.name)}" offset="${offsetTicks}/${fpsNum}s"${laneAttr} ref="${asset.resourceId}" start="${startTicks}/${fpsNum}s" duration="${durTicks}/${fpsNum}s" audioRole="${xmlAttr(clip.audioRole)}"${formatAttr} tcFormat="NDF"`;
+    if (!fadeXml) return `${open} />`;
+    return `${open}>\n${fadeXml}\n${hasCrossfade ? '              ' : '            '}</asset-clip>`;
   }).join('\n');
 
   const baseName = normalized.name || 'multitrack_project';
   const resolvedOutput = path.resolve(outputPath || `${baseName}_cut.fcpxml`);
-  const totalTicks = toFCPTicks(finalKeeps.reduce((sum, keep) => sum + Math.max(0, keep.end - keep.start), 0));
+  const totalDuration = finalKeeps.reduce((sum, keep) => sum + Math.max(0, keep.end - keep.start), 0)
+    - crossfades.reduce((sum, value) => sum + value, 0);
+  const totalTicks = toFCPTicks(totalDuration);
+  const clipsMarkup = hasCrossfade
+    ? `            <gap name="Crossfade Timeline" offset="0/1s" start="0/1s" duration="${totalTicks}/${fpsNum}s">\n${clips}\n            </gap>`
+    : clips;
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <fcpxml version="1.8">
@@ -178,7 +230,7 @@ ${resources}
       <project name="${xmlAttr(baseName)}_cut" uid="${uuid()}">
         <sequence duration="${totalTicks}/${fpsNum}s" format="rfmt" tcStart="0/1s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
           <spine>
-${clips}
+${clipsMarkup}
           </spine>
         </sequence>
       </project>
@@ -186,7 +238,7 @@ ${clips}
   </library>
 </fcpxml>`;
 
-  return { xml, outputPath: resolvedOutput, finalKeeps, finalClips, baseName };
+  return { xml, outputPath: resolvedOutput, finalKeeps, finalClips, crossfades, baseName };
 }
 
 /**
@@ -208,6 +260,9 @@ function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts, durationH
 
   // 切割算法单一来源：合并删除段 → 取反 → 边界吸附静音 → 内部长静音二次切
   const finalKeeps = computeFinalKeeps(deleteList, silencePeriods, duration, cutOpts);
+  const crossfades = computeCrossfadeDurations(finalKeeps, cutOpts && cutOpts.crossfadeMs);
+  const crossfadeOffsets = crossfadePrefix(crossfades);
+  const hasCrossfade = crossfades.some(value => value > 0);
 
   const baseName = path.basename(videoFile, path.extname(videoFile));
   const outputPath = path.resolve(`${baseName}_cut.fcpxml`);
@@ -221,17 +276,30 @@ function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts, durationH
 
   // 每个保留片段一个 asset-clip，引用同一个 asset r1；
   // offset 在 tick 空间累加，避免浮点秒累积误差导致 ±1 帧偏移
-  let timelineOffsetTicks = 0;
-  const clips = finalKeeps.map((seg) => {
+  let hardTimelineOffset = 0;
+  const clips = finalKeeps.map((seg, index) => {
     const startTicks = toFCPTicks(seg.start);
     const durTicks = toFCPTicks(seg.end - seg.start);
-    const offsetTicks = timelineOffsetTicks;
-    timelineOffsetTicks += durTicks;
+    const offsetTicks = toFCPTicks(hardTimelineOffset - crossfadeOffsets[index]);
+    hardTimelineOffset += seg.end - seg.start;
     const formatAttr = hasVideo ? ' format="r2"' : '';
-    return `            <asset-clip name="${baseName}" offset="${offsetTicks}/${fpsNum}s" ref="r1" start="${startTicks}/${fpsNum}s" duration="${durTicks}/${fpsNum}s" audioRole="dialogue"${formatAttr} tcFormat="NDF" />`;
+    const laneAttr = hasCrossfade ? ` lane="${1 + (index % 2)}"` : '';
+    const indent = hasCrossfade ? '              ' : '            ';
+    const fadeXml = volumeFadeXml({
+      fadeIn: index > 0 ? crossfades[index - 1] : 0,
+      fadeOut: index < crossfades.length ? crossfades[index] : 0,
+      toTicks: toFCPTicks,
+      denominator: fpsNum,
+      indent: hasCrossfade ? '                ' : '              ',
+    });
+    const open = `${indent}<asset-clip name="${baseName}" offset="${offsetTicks}/${fpsNum}s"${laneAttr} ref="r1" start="${startTicks}/${fpsNum}s" duration="${durTicks}/${fpsNum}s" audioRole="dialogue"${formatAttr} tcFormat="NDF"`;
+    return fadeXml ? `${open}>\n${fadeXml}\n${indent}</asset-clip>` : `${open} />`;
   }).join('\n');
 
-  const totalTicks = timelineOffsetTicks;
+  const totalTicks = toFCPTicks(hardTimelineOffset - crossfades.reduce((sum, value) => sum + value, 0));
+  const clipsMarkup = hasCrossfade
+    ? `            <gap name="Crossfade Timeline" offset="0/1s" start="0/1s" duration="${totalTicks}/${fpsNum}s">\n${clips}\n            </gap>`
+    : clips;
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <fcpxml version="1.8">
@@ -244,7 +312,7 @@ function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts, durationH
       <project name="${baseName}_cut" uid="${uuid()}">
         <sequence duration="${totalTicks}/${fpsNum}s" format="r2" tcStart="0/1s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
           <spine>
-${clips}
+${clipsMarkup}
           </spine>
         </sequence>
       </project>
@@ -252,7 +320,7 @@ ${clips}
   </library>
 </fcpxml>`;
 
-  return { xml, outputPath, finalKeeps, baseName };
+  return { xml, outputPath, finalKeeps, crossfades, baseName };
 }
 
 module.exports = { buildFcpxml, buildTimelineFcpxml };

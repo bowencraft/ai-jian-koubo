@@ -15,6 +15,7 @@ let reviewReady = false;
 let waveformDrawRaf = null;
 let lastPreviewSignature = '';
 let projectFilePath = '';
+let toastTimer = null;
 
 const labelWidth = 112;
 const trackHeight = 76;
@@ -32,6 +33,18 @@ const assetById = () => new Map(project.assets.map(asset => [asset.id, asset]));
 
 function setStatus(text) {
   $('status').textContent = text;
+}
+
+function showToast(message, tone = 'info', duration = 2800) {
+  const region = $('toastRegion');
+  if (!region) return;
+  clearTimeout(toastTimer);
+  region.innerHTML = '';
+  const toast = document.createElement('div');
+  toast.className = `app-toast ${tone}`;
+  toast.textContent = message;
+  region.appendChild(toast);
+  toastTimer = setTimeout(() => { region.innerHTML = ''; }, duration);
 }
 
 function setDirty(value) {
@@ -199,7 +212,7 @@ async function loadProject() {
   pendingMetadataProbe.catch(err => setStatus('素材读取失败: ' + err.message));
 }
 
-async function saveProject() {
+async function saveProject({ notify = false } = {}) {
   ensureTimeline();
   const res = await fetch('/api/project', {
     method: 'POST',
@@ -209,6 +222,7 @@ async function saveProject() {
   const data = await res.json();
   if (!data.success) {
     setStatus('保存失败: ' + data.error);
+    showToast('项目保存失败：' + (data.error || '未知错误'), 'error', 4800);
     return false;
   }
   normalizeClientProject(data.project);
@@ -221,7 +235,36 @@ async function saveProject() {
   } else if (data.reviewAudio && data.reviewAudio.error) {
     setStatus('已保存，但审核音频更新失败: ' + data.reviewAudio.error);
   }
+  if (notify) showToast('项目已保存', 'success');
   return data;
+}
+
+async function goToReview() {
+  if (!reviewReady) {
+    const message = '审核页尚未生成。请先点击“交给 AI”，完成转录与智能裁切。';
+    setStatus(message);
+    showToast(message, 'info', 4200);
+    return;
+  }
+  const button = $('reviewBtn');
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  try {
+    if (dirty) {
+      setStatus('正在保存修改并进入审核页...');
+      showToast('正在保存时间线修改...');
+      const saved = await saveProject();
+      if (!saved) return;
+    }
+    location.href = '/review.html';
+  } catch (err) {
+    const message = '无法进入审核页：' + err.message;
+    setStatus(message);
+    showToast(message, 'error', 4800);
+  } finally {
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+  }
 }
 
 function transcriptHandoffPrompt() {
@@ -253,6 +296,7 @@ async function copyTranscriptHandoff() {
     }
     $('copyHandoffBtn').textContent = '已复制';
     setStatus('提示词已复制，回到 AI 对话粘贴即可继续');
+    showToast('提示词已复制', 'success');
   } catch (err) {
     field.focus();
     field.select();
@@ -263,6 +307,7 @@ async function copyTranscriptHandoff() {
 async function markNeedsTranscript() {
   if (!project.clips.length) {
     setStatus('请先把至少一个素材片段放到时间线');
+    showToast('请先把至少一个素材片段放到时间线');
     return;
   }
   project.transcript = {
@@ -324,9 +369,13 @@ function removeAsset(id) {
 function removeSelectedAsset() {
   if (!selectedAssetId) {
     setStatus('先在素材库选择一个素材');
+    showToast('请先选择要移除的素材');
     return;
   }
+  const asset = project.assets.find(item => item.id === selectedAssetId);
+  const clipCount = project.clips.filter(clip => clip.assetId === selectedAssetId).length;
   removeAsset(selectedAssetId);
+  showToast(`已移除「${asset && asset.name ? asset.name : '素材'}」${clipCount ? `及 ${clipCount} 个片段` : ''}`);
 }
 
 function addClipFromAsset(assetId, trackIndex, timelineStart) {
@@ -478,9 +527,10 @@ function renderFlowButtons() {
   const reviewBtn = $('reviewBtn');
   const staleBtn = $('staleBtn');
   if (!reviewBtn || !staleBtn) return;
-  reviewBtn.disabled = !reviewReady;
+  reviewBtn.disabled = false;
+  reviewBtn.setAttribute('aria-disabled', reviewReady ? 'false' : 'true');
   staleBtn.disabled = !project.clips.length;
-  reviewBtn.title = reviewReady ? '回到审核页' : '当前项目还未生成审核页。保存后回到聊天框，让 AI 开始创建审核';
+  reviewBtn.title = reviewReady ? '进入审核页（自动保存当前修改）' : '审核页尚未生成，点击查看下一步';
   staleBtn.title = project.clips.length
     ? (reviewReady ? '完成编辑，标记需要重新转文字并复制 AI 提示词' : '完成编辑并复制 AI 转录提示词')
     : '先把素材片段放到时间线';
@@ -1359,8 +1409,11 @@ function bindChrome() {
     event.target.value = '';
   };
   $('exportProjectBtn').onclick = exportProjectJson;
-  $('saveBtn').onclick = saveProject;
-  $('reviewBtn').onclick = () => { if (reviewReady) location.href = '/review.html'; };
+  $('saveBtn').onclick = () => saveProject({ notify: true }).catch(err => {
+    setStatus('保存失败: ' + err.message);
+    showToast('项目保存失败：' + err.message, 'error', 4800);
+  });
+  $('reviewBtn').onclick = goToReview;
   $('staleBtn').onclick = () => markNeedsTranscript().catch(err => setStatus('标记失败: ' + err.message));
   $('closeHandoffBtn').onclick = hideTranscriptHandoff;
   $('copyHandoffBtn').onclick = copyTranscriptHandoff;
@@ -1538,4 +1591,9 @@ function bindGlobalTooltips() {
 }
 
 bindChrome();
+window.addEventListener('beforeunload', event => {
+  if (!dirty) return;
+  event.preventDefault();
+  event.returnValue = '';
+});
 loadProject().catch(err => setStatus('加载失败: ' + err.message));

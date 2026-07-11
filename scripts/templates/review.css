@@ -93,6 +93,27 @@
     }
     .brand em { font-style: normal; color: var(--ember); }
 
+    .page-switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 30px;
+      padding: 0 10px;
+      flex-shrink: 0;
+      font-size: 12px;
+      font-weight: 750;
+    }
+    .page-switch.editor-switch {
+      color: #ffe0d5;
+      border-color: rgba(255,122,77,.7);
+      background: rgba(255,122,77,.2);
+    }
+    .page-switch.editor-switch:hover {
+      color: var(--paper-100);
+      border-color: var(--ember);
+      background: rgba(255,122,77,.36);
+    }
+
     .file-meta {
       display: flex;
       flex-direction: column;
@@ -612,6 +633,19 @@
       color: var(--paper-500); margin: -1px 0 3px;
     }
     .knob input[type=range] { width: 100%; accent-color: #2540FF; height: 4px; cursor: pointer; }
+    .crossfade-knob {
+      margin-top: 2px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+    .crossfade-knob input[type=range] { accent-color: var(--ember); }
+    .range-scale {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 9px;
+      color: var(--paper-500);
+    }
     /* 松紧示意：一条由粗到细的楔形线——粗端「紧」有力量感，细端「松」轻盈 */
     .tightness { display: flex; flex-direction: column; gap: 9px; padding-top: 4px; }
     .tightness-line { display: flex; align-items: center; gap: 12px; }
@@ -1057,6 +1091,32 @@
       box-shadow: 0 10px 24px rgba(0,0,0,.42);
     }
 
+    .toast-region {
+      position: fixed;
+      top: 60px;
+      left: 50%;
+      z-index: 12000;
+      transform: translateX(-50%);
+      pointer-events: none;
+    }
+    .app-toast {
+      min-width: 220px;
+      max-width: min(520px, calc(100vw - 32px));
+      padding: 9px 12px;
+      border: 1px solid var(--line-2);
+      border-radius: 6px;
+      background: #090a0f;
+      color: var(--paper-100);
+      font-size: 12px;
+      line-height: 1.45;
+      text-align: center;
+      box-shadow: 0 14px 34px rgba(0,0,0,.42);
+      animation: toast-in .16s ease-out;
+    }
+    .app-toast.success { border-color: rgba(52,211,153,.6); color: #a7f3d0; }
+    .app-toast.error { border-color: rgba(248,113,113,.7); color: #fecaca; }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(-5px); } }
+
     @media (max-width: 1100px) {
       .topbar { grid-template-columns: auto 1fr auto; gap: 10px; }
       .file-meta { display: none; }
@@ -1067,11 +1127,16 @@
     @media (max-width: 880px) {
       .topbar { padding: 0 8px; gap: 8px; }
       .brand { font-size: 16px; }
-      .tb-left { width: 62px; }
+      .tb-left { width: auto; gap: 7px; }
       .tb-center, .tb-right { gap: 5px; }
       .tb-sep { display: none; }
       #silenceThreshold { width: 108px; }
       .time-display { min-width: 88px; padding: 0; }
+    }
+
+    @media (max-width: 760px) {
+      .page-switch { width: 30px; min-width: 30px; padding: 0; justify-content: center; }
+      .page-switch span, .brand { display: none; }
     }
 
     ::selection { background: var(--signal); color: var(--paper-100); }

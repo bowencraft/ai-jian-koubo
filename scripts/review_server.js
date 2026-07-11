@@ -22,7 +22,7 @@ const {
   buildEditedSrt,
   normalizeBitrate,
   runEditedAudioExport,
-  totalKeepDuration,
+  crossfadedDuration,
 } = require('./lib/review_exports');
 const { createLegacyProject, normalizeProject, stripProjectWaveforms } = require('./lib/timeline_project');
 const { hashBuffer, findDuplicateAsset } = require('./lib/asset_dedupe');
@@ -663,7 +663,7 @@ const server = http.createServer((req, res) => {
           status: 'running',
           progress: 0,
           outTime: 0,
-          duration: totalKeepDuration(finalKeeps),
+          duration: crossfadedDuration(finalKeeps, cutOpts && cutOpts.crossfadeMs),
           output: outputPath,
           segments: finalKeeps.length,
           bitrate,
@@ -676,6 +676,7 @@ const server = http.createServer((req, res) => {
           outputPath,
           finalKeeps,
           bitrate,
+          crossfadeMs: cutOpts && cutOpts.crossfadeMs,
           onProgress: (progress) => {
             job.progress = progress.progress;
             job.outTime = progress.outTime;
@@ -733,7 +734,11 @@ const server = http.createServer((req, res) => {
       try {
         const { deleteList, cutOpts } = parseExportPayload(body);
         const { finalKeeps } = computeReviewKeeps(deleteList, cutOpts);
-        const { srt, cues } = buildEditedSrt({ words: reviewWords, finalKeeps });
+        const { srt, cues } = buildEditedSrt({
+          words: reviewWords,
+          finalKeeps,
+          crossfadeMs: cutOpts && cutOpts.crossfadeMs,
+        });
         if (!cues.length) {
           throw new Error('没有可导出的字幕内容');
         }

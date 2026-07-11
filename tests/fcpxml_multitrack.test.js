@@ -45,7 +45,7 @@ try {
     project,
     deleteList: [{ start: 3, end: 4 }],
     silencePeriods: [],
-    cutOpts: {},
+    cutOpts: { crossfadeMs: 100 },
     durationHint: 12,
     outputPath: '/tmp/multitrack-demo_cut.fcpxml',
   });
@@ -58,6 +58,9 @@ try {
   assert(result.xml.includes('audioRole="dialogue.guest"'), 'clip audio role should be preserved');
   assert(result.finalClips.length === 4, 'delete range should split two timeline clips into four exported clips');
   assert(result.finalClips.every(c => c.duration > 0), 'exported clips should all have positive duration');
+  assert(result.xml.includes('<gap name="Crossfade Timeline"'), 'multitrack crossfade should export clips in an overlap-capable gap');
+  assert(result.xml.includes('<fadeIn type="easeIn"'), 'multitrack incoming edges should fade in');
+  assert(result.xml.includes('<fadeOut type="easeOut"'), 'multitrack outgoing edges should fade out');
 } finally {
   childProcess.execSync = originalExecSync;
 }
