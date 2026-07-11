@@ -1111,12 +1111,21 @@ let words = [];
       }
     }
 
+    function setPlayButtonState(playing) {
+      const button = document.getElementById('playBtn');
+      const label = playing ? '暂停' : '播放';
+      button.classList.toggle('is-playing', playing);
+      button.setAttribute('aria-label', label);
+      button.dataset.tooltip = label;
+      if (button.hasAttribute('title')) button.setAttribute('title', label);
+    }
+
     video.addEventListener('play', () => {
-      document.getElementById('playBtn').textContent = '❚❚ 暂停';
+      setPlayButtonState(true);
       startTick();
     });
     video.addEventListener('pause', () => {
-      document.getElementById('playBtn').textContent = '▶ 播放';
+      setPlayButtonState(false);
       // 暂停时刷新一次时间/波形，确保静止状态准确
       const t = video.currentTime, dur = video.duration || 0;
       timeCur.textContent = formatTime(t);
@@ -1477,7 +1486,7 @@ let words = [];
     const WAVE_H_KEY = 'reviewWaveH';
     // dock 内除波形外的固定占用（标尺 + 状态栏 + padding）+ 顶栏 + stage 最小高度
     function waveHMax() {
-      return Math.max(WAVE_H_MIN, window.innerHeight - 64 /*topbar*/ - 64 /*dock chrome*/ - 200 /*min stage*/);
+      return Math.max(WAVE_H_MIN, window.innerHeight - 50 /*topbar*/ - 64 /*dock chrome*/ - 200 /*min stage*/);
     }
     function clampWaveH(h) {
       return Math.max(WAVE_H_MIN, Math.min(h, waveHMax()));
@@ -1517,4 +1526,64 @@ let words = [];
       // 视口变化时重新夹紧（换显示器 / 缩放窗口都会触发）
       window.addEventListener('resize', () => setWaveH(curWaveH(), false));
     })();
+
+    function bindReviewTooltips() {
+      let target = null;
+      let tooltip = null;
+      const selector = '[title], [data-tooltip]';
+
+      const ensureTooltip = () => {
+        if (tooltip) return tooltip;
+        tooltip = document.createElement('div');
+        tooltip.className = 'app-tooltip';
+        tooltip.hidden = true;
+        document.body.appendChild(tooltip);
+        return tooltip;
+      };
+
+      const positionTooltip = () => {
+        if (!target || !tooltip || tooltip.hidden) return;
+        const rect = target.getBoundingClientRect();
+        const tipRect = tooltip.getBoundingClientRect();
+        const left = Math.max(8, Math.min(rect.left + rect.width / 2 - tipRect.width / 2, window.innerWidth - tipRect.width - 8));
+        const top = rect.top >= tipRect.height + 10
+          ? rect.top - tipRect.height - 8
+          : Math.min(window.innerHeight - tipRect.height - 8, rect.bottom + 8);
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = Math.max(8, top) + 'px';
+      };
+
+      const showTooltip = element => {
+        if (!element || element.disabled) return;
+        const text = element.getAttribute('title') || element.dataset.tooltip || element.getAttribute('aria-label') || '';
+        if (!text) return;
+        if (element.hasAttribute('title')) {
+          element.dataset.tooltip = element.getAttribute('title');
+          element.removeAttribute('title');
+        }
+        target = element;
+        const tip = ensureTooltip();
+        tip.textContent = text;
+        tip.hidden = false;
+        positionTooltip();
+      };
+
+      const hideTooltip = () => {
+        if (tooltip) tooltip.hidden = true;
+        if (target && target.dataset.tooltip && !target.hasAttribute('title')) target.setAttribute('title', target.dataset.tooltip);
+        target = null;
+      };
+
+      document.addEventListener('pointerover', event => showTooltip(event.target.closest(selector)));
+      document.addEventListener('pointermove', positionTooltip);
+      document.addEventListener('pointerout', event => {
+        if (target && (!event.relatedTarget || !target.contains(event.relatedTarget))) hideTooltip();
+      });
+      document.addEventListener('focusin', event => showTooltip(event.target.closest(selector)));
+      document.addEventListener('focusout', hideTooltip);
+      window.addEventListener('scroll', positionTooltip, true);
+      window.addEventListener('resize', positionTooltip);
+    }
+
+    bindReviewTooltips();
   

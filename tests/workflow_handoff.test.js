@@ -27,8 +27,14 @@ assert(!editorJs.includes('staleBtn.disabled = !reviewReady'));
 
 assert(reviewHtml.includes('id="distributionModal"'));
 assert(reviewHtml.includes('id="distributionPrompt"'));
+assert(reviewHtml.includes('<div class="brand">剪<em>播客</em></div>'));
+assert(!reviewHtml.includes('class="brand-mark"'));
+assert(!reviewHtml.includes('fonts.googleapis.com'));
+assert.strictEqual((reviewHtml.match(/class="ui-icon/g) || []).length >= 9, true);
 assert(reviewJs.includes('创建“打包并分发审核页”任务'));
 assert(reviewJs.includes('package_review.sh'));
+assert(reviewJs.includes("classList.toggle('is-playing', playing)"));
+assert(reviewJs.includes('bindReviewTooltips()'));
 
 assert(serverJs.includes('projectFile: PROJECT_FILE'));
 assert(serverJs.includes('reviewDir: process.cwd()'));

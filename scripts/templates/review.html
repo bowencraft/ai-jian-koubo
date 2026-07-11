@@ -6,9 +6,6 @@
   <title>剪口播 · 审核稿</title>
   <script src="/lib/compute_keeps.js"></script>
   <script src="/lib/review_timeline_view.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./review.css">
 </head>
 
@@ -27,33 +24,20 @@
     </div>
   </div>
 
-  <!-- 顶栏 · 指挥台 -->
+  <!-- 顶栏 · 与素材编辑页共用同一工具语言 -->
   <div class="topbar">
     <div class="tb-left">
-      <div class="brand">
-        <svg class="brand-mark" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="剪口播">
-          <rect width="36" height="36" rx="9" fill="#F2EBDD"/>
-          <g fill="#2540FF">
-            <rect x="6"    y="14"   width="3" height="8"  rx="1.5"/>
-            <rect x="10.5" y="10.5" width="3" height="15" rx="1.5"/>
-            <rect x="23"   y="9"    width="3" height="18" rx="1.5"/>
-            <rect x="27.5" y="12.5" width="3" height="11" rx="1.5"/>
-          </g>
-          <path d="M14 6 H22 L18 11 Z" fill="#FF7A4D"/>
-          <rect x="17.1" y="7" width="1.8" height="22" rx="0.9" fill="#FF7A4D"/>
-        </svg>
-        <span class="brand-word">剪<em>口播</em></span>
-      </div>
+      <div class="brand">剪<em>播客</em></div>
       <div class="file-meta">
         <div class="file-sub" id="fileSub">REVIEW <span class="dot">●</span> 加载中</div>
       </div>
     </div>
     <div class="tb-center">
-      <button class="ghost-tight" onclick="seekRel(-5)" title="后退 5s">⏮</button>
-      <button class="play-btn" onclick="togglePlay()" id="playBtn">▶ 播放</button>
-      <button class="ghost-tight" onclick="seekRel(5)" title="前进 5s">⏭</button>
+      <button class="icon-btn" onclick="seekRel(-5)" title="后退 5 秒" aria-label="后退 5 秒"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 7 6 12l5 5M18 7l-5 5 5 5"/></svg></button>
+      <button class="icon-btn play-btn" onclick="togglePlay()" id="playBtn" title="播放" aria-label="播放"><svg class="ui-icon play-state" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 9 6-9 6z"/></svg><svg class="ui-icon pause-state" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7v10M15 7v10"/></svg></button>
+      <button class="icon-btn" onclick="seekRel(5)" title="前进 5 秒" aria-label="前进 5 秒"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m13 7 5 5-5 5M6 7l5 5-5 5"/></svg></button>
       <div class="tb-sep"></div>
-      <select id="speed" onchange="setSpeed(parseFloat(this.value))">
+      <select id="speed" onchange="setSpeed(parseFloat(this.value))" aria-label="播放速度" title="播放速度">
         <option value="0.5">0.5×</option>
         <option value="0.75">0.75×</option>
         <option value="1" selected>1×</option>
@@ -61,7 +45,7 @@
         <option value="1.5">1.5×</option>
         <option value="2">2×</option>
       </select>
-      <select id="silenceThreshold" onchange="applySilenceThreshold(parseFloat(this.value))" title="一键勾选逐字稿里 ≥ 此长度的气口/停顿为「删减」（红色），你还能手动改。">
+      <select id="silenceThreshold" onchange="applySilenceThreshold(parseFloat(this.value))" aria-label="气口选择阈值" title="一键勾选逐字稿里 ≥ 此长度的气口/停顿为删减">
         <option value="0.2" selected>气口 ≥ 0.2s</option>
         <option value="0.3">气口 ≥ 0.3s</option>
         <option value="0.5">气口 ≥ 0.5s</option>
@@ -70,13 +54,13 @@
       <span class="time-display"><span id="timeCur">00:00</span><span class="sep">/</span><span id="timeTot">00:00</span></span>
     </div>
     <div class="tb-right">
-      <button class="ghost" onclick="location.href='/editor.html'" title="回到素材编辑页调整多轨时间线">素材编辑</button>
-      <button class="ghost" onclick="saveDraft()" title="保存当前勾选状态到本地 review_draft.json">保存进度</button>
-      <button class="ghost" onclick="exportDraft()" title="把当前进度下载为 JSON 文件">导出进度</button>
-      <button class="ghost" onclick="document.getElementById('draftImport').click()" title="导入之前导出的进度 JSON">导入进度</button>
-      <input id="draftImport" type="file" accept="application/json,.json" style="display:none" onchange="importDraftFile(event)">
+      <button class="icon-btn" onclick="location.href='/editor.html'" title="回到素材编辑页" aria-label="回到素材编辑页"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4zM8 3v6M16 3v6M8 15h8"/></svg></button>
+      <button class="icon-btn" onclick="saveDraft()" title="保存审核进度" aria-label="保存审核进度"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5z"/><path d="M8 3v6h8V3M8 21v-7h8v7"/></svg></button>
+      <button class="icon-btn" onclick="exportDraft()" title="导出审核进度 JSON" aria-label="导出审核进度 JSON"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 19h14"/></svg></button>
+      <button class="icon-btn" onclick="document.getElementById('draftImport').click()" title="导入审核进度 JSON" aria-label="导入审核进度 JSON"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M5 20h14"/></svg></button>
+      <input id="draftImport" type="file" accept="application/json,.json" hidden onchange="importDraftFile(event)">
       <div class="export-menu" id="exportMenu">
-        <button class="primary export-trigger" onclick="toggleExportMenu(event)" aria-haspopup="true" aria-expanded="false">导出为...</button>
+        <button class="icon-btn primary export-trigger" onclick="toggleExportMenu(event)" title="导出为 FCPXML、MP3 或 SRT" aria-label="导出为..." aria-haspopup="true" aria-expanded="false"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v6H5V6h6"/></svg></button>
         <div class="export-options" role="menu" aria-label="导出选项">
           <button onclick="exportFCPXML()" role="menuitem">FCPXML</button>
           <button onclick="exportEditedAudio('96k')" role="menuitem">音频 MP3 96 kbps</button>
@@ -87,7 +71,7 @@
         </div>
       </div>
       <div class="tb-sep"></div>
-      <button class="danger" onclick="clearAll()" title="清空选择">清空</button>
+      <button class="icon-btn danger" onclick="clearAll()" title="清空全部删减选择" aria-label="清空全部删减选择"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M7 7l1 14h8l1-14"/></svg></button>
     </div>
   </div>
 
